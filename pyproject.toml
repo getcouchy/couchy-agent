@@ -1,0 +1,13 @@
+[project]
+name = "couchy-agent"
+description = "Keeps each Couchy tenant's files on a ComfyUI server in its own namespace: pairing, keys, /couchy routes and a guard on ComfyUI's /view, /upload and /prompt."
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/getcouchy/couchy-agent"
+
+[tool.comfy]
+PublisherId = "getcouchy"
+DisplayName = "couchy-agent"
