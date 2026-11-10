@@ -11,6 +11,7 @@ never reaches the guard's body parsing.
 
 import logging
 import os
+import re
 
 from aiohttp import web
 
@@ -19,7 +20,9 @@ log = logging.getLogger("couchy_agent")
 ENV = "COUCHY_AGENT_LOCKDOWN"
 
 OPEN = ("/couchy/pair",)
-OPEN_PREFIXES = ("/couchy/models/blob/",)
+# Exactly one more segment, a SHA-256: a prefix would also pass
+# /couchy/models/blob/../../index.html to ComfyUI's static route at /.
+OPEN_PATTERNS = (re.compile(r"^/couchy/models/blob/[0-9a-f]{64}$"),)
 
 
 def enabled(env=None):
@@ -29,7 +32,7 @@ def enabled(env=None):
 def _open(path):
     if path.startswith("/api/"):
         path = path[4:]
-    return path in OPEN or path.startswith(OPEN_PREFIXES)
+    return path in OPEN or any(p.match(path) for p in OPEN_PATTERNS)
 
 
 def middleware(agent):

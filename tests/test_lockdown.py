@@ -6,6 +6,7 @@ import os
 import unittest
 
 import aiohttp
+import yarl
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase
 
@@ -44,13 +45,25 @@ class LockdownTest(AioHTTPTestCase):
             await sock.close()
             return sock
 
+        async def blob(request):
+            return web.Response(status=404)
+
+        # ComfyUI serves its frontend as a static route at /, last.
+        web_root = os.path.join(self.t.base, "web")
+        os.makedirs(web_root)
+        with open(os.path.join(web_root, "index.html"), "w") as f:
+            f.write("<html>ComfyUI</html>")
+
         app = web.Application(middlewares=[lockdown.middleware(self.agent), self.agent.middleware()])
         self.agent.add_routes(app.router)
+        app.router.add_get("/couchy/models/blob/{sha256}", blob)
+        app.router.add_get("/api/couchy/models/blob/{sha256}", blob)
         for path in ("/", "/system_stats", "/object_info", "/api/object_info", "/history", "/view", "/queue",
                      "/manager/version", "/comfyform/packs"):
             app.router.add_get(path, comfy)
         app.router.add_post("/prompt", comfy)
         app.router.add_get("/ws", ws)
+        app.router.add_static("/", web_root)
         return app
 
     async def asyncTearDown(self):
@@ -97,6 +110,18 @@ class LockdownTest(AioHTTPTestCase):
         r = await self.client.get("/couchy/usage", headers={"X-Couchy-Agent-Key": key})
         self.assertEqual((await r.json())["lockdown"], "on")
 
+    async def test_the_blob_opening_is_exactly_one_hash(self):
+        r = await self.client.get("/index.html")
+        self.assertEqual(r.status, 401)
+        base = str(self.server.make_url("/")).rstrip("/")
+        for path in ("/couchy/models/blob/../../../index.html", "/api/couchy/models/blob/../../../../index.html",
+                     "/couchy/models/blob/" + "0" * 64 + "/x", "/couchy/models/blob/" + "0" * 63,
+                     "/couchy/models/blob/"):
+            # Sent as is: the client would otherwise fold the .. away.
+            r = await self.client.session.get(yarl.URL(base + path, encoded=True))
+            self.assertEqual(r.status, 401, path)
+            self.assertNotIn("ComfyUI", await r.text(), path)
+
     async def test_pairing_and_the_blob_stay_open(self):
         r = await self.pair("WRONGWRONG12")
         self.assertEqual(r.status, 403)  # the pairing route answered, not lockdown
@@ -141,9 +166,12 @@ class LockdownTest(AioHTTPTestCase):
                 with open(os.path.join(dirpath, fn), "rb") as f:
                     self.assertNotIn(TOKEN.encode(), f.read(), fn)
 
-    async def test_no_token_means_no_token_pairing(self):
+    async def test_no_token_or_a_short_one_means_no_token_pairing(self):
         self.assertFalse(self.store.arm_token(""))
         self.assertEqual((await self.pair("")).status, 403)
+        short = "x" * 31
+        self.assertFalse(self.store.arm_token(short))
+        self.assertEqual((await self.pair(short)).status, 403)
 
 
 class EnvTest(unittest.TestCase):

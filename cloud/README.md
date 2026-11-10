@@ -6,8 +6,11 @@
 - ComfyUI and the packs Couchy needs, at the commits [`manifest.json`](manifest.json) pins:
   ComfyUI-Manager, WAS Node Suite, ComfyUI-GGUF, ComfyUI-VideoHelperSuite and
   couchyforms-helper. It's a copy of getcouchy/couchy's `runtime/manifest.json` (the managed
-  runtime, as of 27bf6bf), so update the two together. `install.sh` is that repo's
-  `runtime/install.sh`, plus `COUCHY_SKIP_PACKS`.
+  runtime, as of 27bf6bf), so update the two together, keeping one difference: the
+  `comfyform-helper` pack's `repo` is `https://github.com/getcouchy/couchyforms-helper` (not
+  `erstaples/comfyform-helper`) and it has `"private": true`, since CI checks it out with a token.
+  The commit pins are the same. `install.sh` is that repo's `runtime/install.sh`, plus
+  `COUCHY_SKIP_PACKS`.
 - couchy-agent from this checkout, in **lockdown** (`COUCHY_AGENT_LOCKDOWN=1`).
 - Caddy (2.10.2) as the token proxy.
 - No models.
@@ -28,7 +31,7 @@ ComfyUI or Caddy stops, the container stops.
 | Env | |
 | --- | --- |
 | `COUCHY_SERVER_TOKEN` | Required. The token Caddy checks: 32 to 256 of `A-Z a-z 0-9 . _ ~ -` |
-| `COUCHY_AGENT_PAIRING_TOKEN` | The one-time token the API minted for this pod. `POST /couchy/pair {code: <token>}` pairs once, within 30 minutes of the agent's start, and the key it answers has `models: write` |
+| `COUCHY_AGENT_PAIRING_TOKEN` | The one-time token the API minted for this pod: at least 32 random characters (shorter ones are ignored). `POST /couchy/pair {code: <token>}` pairs once, within 30 minutes of the agent's start, and the key it answers has `models: write`. Tries share the pairing lockout, which behind Caddy is one bucket for every caller, so only a long random token is safe |
 | `COUCHY_AGENT_ALLOWED_HOSTS` | Comma-separated hosts added to `allowed-hosts`, such as the workspace's model buckets, for presigned pulls |
 | `COUCHY_MODELS_DIR` | A mounted folder, such as a RunPod network volume, to use as ComfyUI's models folder. The hash index goes in `<dir>/.couchy-index` so a new pod rehashes only what changed |
 | `COUCHY_AGENT_INDEX_DIR` | Where the hash index goes instead |
@@ -39,8 +42,10 @@ the pod, through RunPod's proxy URL.
 
 ## Build and test
 
-CI (`.github/workflows/cloud-image.yml`) builds the image on every pull request that changes it,
-runs `smoke.sh` against it on the CPU, and on a release tag `v<version>` pushes it to GHCR. Its
+CI (`.github/workflows/cloud-image.yml`, steps in `ci.sh`) builds the image on every pull
+request that changes it and runs `smoke.sh` against it on the CPU, with read-only permissions.
+On a release tag `v<version>` a separate job, the only one that may write packages, does the
+same and pushes it to GHCR. Its
 secret `COUCHY_CLOUD_REPO_TOKEN` must be able to read getcouchy/couchyforms-helper, which is
 private and is handed to the build as a build context.
 

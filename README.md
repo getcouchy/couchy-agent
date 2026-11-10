@@ -138,7 +138,8 @@ change the agent. The cloud image (`cloud/`, see [its README](cloud/README.md)) 
   stay open, each with its own credential: `POST /couchy/pair` (a code or the token below) and
   `GET /couchy/models/blob/{sha256}` (a ticket). `GET /couchy/usage` reports
   `"lockdown": "on"`.
-- **`COUCHY_AGENT_PAIRING_TOKEN`.** It's a one-time secret the API minted for this host.
+- **`COUCHY_AGENT_PAIRING_TOKEN`.** It's a one-time secret the API minted for this host, at
+  least 32 random characters (a shorter one is ignored, with a warning).
   `POST /couchy/pair {code: <token>, label}` accepts it in place of a printed code, once, within
   30 minutes of the first agent start that saw it; a restart doesn't extend that or re-arm a
   spent token. **The key it answers has `models: write`**, because Couchy is who controls a host

@@ -32,6 +32,9 @@ CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 CODE_LEN = 12
 CODE_TTL = 24 * 3600
 TOKEN_TTL = 30 * 60
+# A pairing token shares the code's lockout, which behind a proxy is one
+# bucket for every caller, so only a long random one is taken.
+TOKEN_MIN = 32
 TOKEN_ENV = "COUCHY_AGENT_PAIRING_TOKEN"
 
 MODES = ("rw", "ro")
@@ -157,7 +160,7 @@ class Store:
         """On start with COUCHY_AGENT_PAIRING_TOKEN set: remember its hash,
         valid 30 minutes from the first start that saw it. A restart with
         the same token keeps that expiry, and a spent token stays spent."""
-        if not isinstance(token, str) or not token.strip():
+        if not isinstance(token, str) or len(token.strip()) < TOKEN_MIN:
             return False
         h = _hash(token.strip())
         with self._locked():

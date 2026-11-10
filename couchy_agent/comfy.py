@@ -27,7 +27,7 @@ from .hashing import Hasher, Index
 from .models_routes import ModelsRoutes
 from .pulls import Pulls
 from .routes import Agent, Folders
-from .store import TOKEN_ENV, Store, format_code
+from .store import TOKEN_ENV, TOKEN_MIN, Store, format_code
 from .tickets import Tickets
 
 log = logging.getLogger("couchy_agent")
@@ -99,6 +99,8 @@ def setup():
 
     if store.arm_token(os.environ.get(TOKEN_ENV, "")):
         log.info("couchy-agent: a pairing token is set; it pairs once, with models: write")
+    elif os.environ.get(TOKEN_ENV, "").strip():
+        log.warning("couchy-agent: %s is shorter than %d characters; it won't pair", TOKEN_ENV, TOKEN_MIN)
     code = store.mint_code_if_none()
     if code:
         log.warning("couchy-agent: pairing code %s (valid 24 hours, also in %s/pairing-code)", format_code(code), store.dir)
