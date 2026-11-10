@@ -57,7 +57,9 @@ class LoadTest(unittest.TestCase):
             spec.loader.exec_module(mod)
         hasher = mod._agent.hasher
         self.addCleanup(lambda: (hasher.stop(), hasher._thread.join(5)))  # before tearDown removes the tree
-        self.assertEqual(mod.NODE_CLASS_MAPPINGS, {})
+        self.assertFalse(hasattr(mod, "NODE_CLASS_MAPPINGS"))  # V3: nodes come from comfy_entrypoint
+        self.assertTrue(callable(mod.comfy_entrypoint))
+        self.assertEqual(mod._agent.scope_hook, "off")  # this folder_paths has none of the three functions
         self.assertEqual(len(self.app.middlewares), 1)
         paths = {r.resource.canonical for r in self.app.router.routes()}
         self.assertTrue({"/couchy/pair", "/couchy/usage", "/api/couchy/files/adopt", "/couchy/models",
@@ -68,6 +70,7 @@ class LoadTest(unittest.TestCase):
         self.assertIn("pairing code", text)
         self.assertIn("models folder", text)  # 0755: open to other accounts
         self.assertNotIn("output folder", text)
+        self.assertIn("scope hook is off", text)
 
 
 if __name__ == "__main__":

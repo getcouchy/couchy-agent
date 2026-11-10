@@ -4,13 +4,16 @@ caller passes a Folders, which comfy.py fills from folder_paths.
 """
 
 import asyncio
+import functools
 import json
 import logging
 import os
+import uuid
 
 from aiohttp import web
 
 from . import files, guard, perms
+from . import scope as scope_mod
 from .store import DEFAULT_MODELS, MODELS_GRANTS, Lockout, models_rank
 
 log = logging.getLogger("couchy_agent")
@@ -24,6 +27,13 @@ KEY_HEADER = "X-Couchy-Agent-Key"
 OLD_FILE_ROUTES = ("/comfyform/files", "/comfyform/files/delete")
 
 UPLOAD_ROUTES = ("/upload/image", "/upload/mask")
+
+# A prompt sent with an rw key but no extra_data.couchy gets a namespace
+# scope (scope.py), so the API's runs keep working until it sends scopes.
+NAMESPACE_SCOPES = True
+
+# Where the /prompt guard leaves the prompt id it bound a scope to.
+_BOUND = web.RequestKey("couchy_agent_prompt_id", str) if hasattr(web, "RequestKey") else "couchy_agent_prompt_id"
 
 
 class Folders:
@@ -71,6 +81,17 @@ class Agent:
         self.folders = folders
         self.lockout = lockout or Lockout()
         self.models = models  # models_routes.ModelsRoutes, or None
+
+    # Set by comfy.py: "on" once the scope hook is installed, the nodes'
+    # version once they're registered, and what to call once paired.
+    scope_hook = "off"
+    node_version = None
+    on_paired = None
+
+    @functools.cached_property
+    def scopes(self):
+        """Run scopes by prompt id (scope.py)."""
+        return scope_mod.Scopes()
 
     def grant(self, request):
         return self.store.authenticate(request_key(request))
@@ -135,13 +156,16 @@ class Agent:
             return _error(403, "that code is wrong, used or expired")
         self.lockout.succeed(client)
         log.info("couchy-agent: paired namespace %s (%s)", result["namespace"], body.get("label", ""))
+        if self.on_paired is not None:
+            self.on_paired()
         return web.json_response(result)
 
     async def usage(self, request):
         g = self._need(request)
         dirs = self.folders.all()
         out = await asyncio.to_thread(files.usage, dirs, g["namespace"])
-        out = {"namespace": g["namespace"], "folders": out, "permissions": perms.permissions(dirs)}
+        out = {"namespace": g["namespace"], "folders": out, "permissions": perms.permissions(dirs),
+               "scope_hook": self.scope_hook, "nodes": self.node_version}
         return web.json_response(out)
 
     async def list_files(self, request):
@@ -232,7 +256,17 @@ class Agent:
             refusal = await self.check(request)
             if refusal is not None:
                 return refusal
-            return await handler(request)
+            prompt_id = request.get(_BOUND)
+            if prompt_id is None:
+                return await handler(request)
+            queued = False
+            try:
+                response = await handler(request)
+                queued = response.status == 200
+                return response
+            finally:
+                if not queued:  # ComfyUI refused the prompt: it will never run
+                    self.scopes.drop(prompt_id)
 
         return couchy_agent_guard
 
@@ -307,7 +341,45 @@ class Agent:
             return None
         if not isinstance(body, dict):
             return None
-        refused = guard.prompt_refusal(body.get("prompt"), self.grant(request))
+        g = self.grant(request)
+        prompt = body.get("prompt")
+        refused = guard.prompt_refusal(prompt, g)
         if refused:
             return self._refuse(request, 403, "this graph names a Couchy namespace this key can't reach: " + ", ".join(refused))
+        return self._bind_scope(request, body, g)
+
+    def _bind_scope(self, request, body, g):
+        """Bind the prompt's run scope to its prompt id and take
+        extra_data.couchy out of the body ComfyUI reads. None to let the
+        request through, else the response refusing it."""
+        prompt_id = body.get("prompt_id")
+        if prompt_id is not None and not isinstance(prompt_id, str):
+            return _error(400, "prompt_id must be a string")
+        if prompt_id is not None and self.scopes.has(prompt_id):
+            # A second prompt under a scoped prompt's id would run with its scope.
+            return self._refuse(request, 409, "that prompt id is already queued")
+        extra = body.get("extra_data")
+        sent = isinstance(extra, dict) and "couchy" in extra
+        rw = g is not None and g["mode"] == "rw"
+        if not sent:
+            if not (rw and NAMESPACE_SCOPES):
+                return None  # unscoped: nothing inside couchy/ through folder_paths
+            scope = scope_mod.namespace_scope(g["namespace"], body.get("prompt"))
+        else:
+            if not rw:
+                return self._refuse(request, 403, "a run scope needs the namespace's read-write key")
+            try:
+                scope = scope_mod.parse(extra["couchy"], g["namespace"], body.get("prompt"))
+            except scope_mod.BadScope as e:
+                return _error(400, str(e))
+            del extra["couchy"]
+        if prompt_id is None:
+            prompt_id = body["prompt_id"] = str(uuid.uuid4())
+        if not self.scopes.bind(prompt_id, scope):
+            return self._refuse(request, 409, "that prompt id is already queued")
+        request[_BOUND] = prompt_id
+        # ComfyUI's handler reads the body aiohttp keeps here.
+        request._read_bytes = json.dumps(body).encode()
+        if scope.is_run:
+            log.info("couchy-agent: prompt %s runs %s with %d inputs", prompt_id, scope.run_id, len(scope.inputs))
         return None

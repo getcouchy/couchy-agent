@@ -24,10 +24,14 @@ class RoutesTest(AioHTTPTestCase):
         self.store = Store(self.t.dirs["user"])
         self.agent = Agent(self.store, Folders(self.t.dirs), Lockout())
         self.reached = []
+        self.bodies = []
+        self.prompt_status = 200
 
         async def comfy(request):
             if request.path.endswith("/prompt"):
-                await request.json()  # the handler can still read the body
+                self.bodies.append(await request.json())  # the handler can still read the body
+                if self.prompt_status != 200:
+                    return web.json_response({"error": "invalid prompt"}, status=self.prompt_status)
             if "upload" in request.path:
                 post = await request.post()
                 self.reached.append(post.get("subfolder", ""))
@@ -277,6 +281,100 @@ class RoutesTest(AioHTTPTestCase):
         plain = {"prompt": {"1": {"class_type": "LoadImage", "inputs": {"image": "example.png"}}}}
         r = await self.client.post("/prompt", json=plain)
         self.assertEqual(r.status, 200)
+
+    # Run scopes on /prompt ---------------------------------------------------
+
+    def scoped(self, **couchy):
+        couchy = {"runId": "r1", "owner": "u1", "inputs": ["up"], **couchy}
+        return {"prompt": {"1": {"class_type": "CouchyLoadImage", "inputs": {"upload": "up"}}},
+                "extra_data": {"extra_pnginfo": {"workflow": {}}, "couchy": couchy}}
+
+    async def test_scope_is_bound_and_stripped(self):
+        await self.seed()
+        r = await self.client.post("/prompt", json=self.scoped(), headers=auth(self.key))
+        self.assertEqual(r.status, 200)
+        body = self.bodies[-1]
+        self.assertEqual(body["extra_data"], {"extra_pnginfo": {"workflow": {}}})  # ComfyUI never sees it
+        pid = body["prompt_id"]  # set, since the API sent none
+        sc = self.agent.scopes.get(pid)
+        self.assertEqual((sc.namespace, sc.owner, sc.run_id, sc.inputs), (self.ns, "u1", "r1", {"up"}))
+        self.assertEqual(sc.class_of("1"), "CouchyLoadImage")
+
+        given = "8a3c1f9e-0d2b-4c6e-9f1a-2b3c4d5e6f70"
+        r = await self.client.post("/api/prompt", json={**self.scoped(), "prompt_id": given}, headers=auth(self.key))
+        self.assertEqual(r.status, 200)
+        self.assertEqual(self.bodies[-1]["prompt_id"], given)
+        self.assertEqual(self.agent.scopes.get(given).run_id, "r1")
+
+    async def test_a_scope_needs_the_rw_key(self):
+        await self.seed()
+        for headers in ({}, auth(self.ro)):
+            r = await self.client.post("/prompt", json=self.scoped(), headers=headers)
+            self.assertEqual(r.status, 403)
+        self.assertEqual((len(self.agent.scopes), self.bodies), (0, []))
+        # okey is rw on the other namespace: the scope is that namespace's.
+        r = await self.client.post("/prompt", json=self.scoped(), headers=auth(self.okey))
+        self.assertEqual(r.status, 200)
+        self.assertEqual(len(self.agent.scopes), 1)
+        self.assertEqual(next(iter(self.agent.scopes._by_prompt.values())).namespace, self.other)
+        self.assertEqual(len(self.bodies), 1)
+
+    async def test_bad_scopes_are_refused(self):
+        await self.seed()
+        for bad in ({"owner": "../u2"}, {"runId": None}, {"inputs": "up"}, {"inputs": ["a/b"]}):
+            r = await self.client.post("/prompt", json=self.scoped(**bad), headers=auth(self.key))
+            self.assertEqual(r.status, 400, bad)
+        r = await self.client.post("/prompt", json={**self.scoped(), "prompt_id": 7}, headers=auth(self.key))
+        self.assertEqual(r.status, 400)
+        self.assertEqual((len(self.agent.scopes), self.bodies), (0, []))
+
+    async def test_a_scoped_prompt_id_cant_be_reused(self):
+        await self.seed()
+        pid = "8a3c1f9e-0d2b-4c6e-9f1a-2b3c4d5e6f70"
+        r = await self.client.post("/prompt", json={**self.scoped(), "prompt_id": pid}, headers=auth(self.key))
+        self.assertEqual(r.status, 200)
+        # Someone in ComfyUI's own UI, sending the queued prompt's id.
+        plain = {"prompt": {"1": {"class_type": "LoadImage", "inputs": {"image": "x.png"}}}, "prompt_id": pid}
+        r = await self.client.post("/prompt", json=plain)
+        self.assertEqual(r.status, 409)
+        r = await self.client.post("/prompt", json={**self.scoped(owner="u2"), "prompt_id": pid}, headers=auth(self.key))
+        self.assertEqual(r.status, 409)
+        self.assertEqual(self.agent.scopes.get(pid).owner, "u1")
+
+    async def test_a_refused_prompt_drops_its_scope(self):
+        await self.seed()
+        self.prompt_status = 400
+        r = await self.client.post("/prompt", json=self.scoped(), headers=auth(self.key))
+        self.assertEqual(r.status, 400)
+        self.assertEqual(len(self.agent.scopes), 0)
+
+    async def test_unscoped_prompts(self):
+        await self.seed()
+        plain = {"prompt": {"1": {"class_type": "LoadImage", "inputs": {"image": "x.png"}}}}
+        r = await self.client.post("/prompt", json=plain)
+        self.assertEqual(r.status, 200)
+        self.assertEqual(self.bodies[-1], plain)  # untouched, and no scope
+        r = await self.client.post("/prompt", json=plain, headers=auth(self.ro))
+        self.assertEqual(len(self.agent.scopes), 0)
+        # The API before it sends scopes: its rw key's namespace.
+        r = await self.client.post("/prompt", json=plain, headers=auth(self.key))
+        self.assertEqual(r.status, 200)
+        sc = self.agent.scopes.get(self.bodies[-1]["prompt_id"])
+        self.assertEqual((sc.namespace, sc.is_run), (self.ns, False))
+
+    async def test_usage_reports_the_hook_and_nodes(self):
+        await self.seed()
+        out = await (await self.client.get("/couchy/usage", headers=auth(self.ro))).json()
+        self.assertEqual((out["scope_hook"], out["nodes"]), ("off", None))
+        self.agent.scope_hook, self.agent.node_version = "on", 1
+        out = await (await self.client.get("/couchy/usage", headers=auth(self.ro))).json()
+        self.assertEqual((out["scope_hook"], out["nodes"]), ("on", 1))
+
+    async def test_pairing_calls_on_paired(self):
+        called = []
+        self.agent.on_paired = lambda: called.append(1)
+        await self.pair()
+        self.assertEqual(called, [1])
 
     async def test_old_file_routes_go_once_paired(self):
         r = await self.client.get("/comfyform/files?type=output")
