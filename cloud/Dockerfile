@@ -7,7 +7,7 @@
 #
 #   docker build -f cloud/Dockerfile \
 #     --build-context couchyforms-helper=../couchyforms-helper \
-#     -t ghcr.io/getcouchy/couchy-comfyui:0.5.0 .
+#     -t ghcr.io/getcouchy/couchy-comfyui:0.6.0 .
 FROM caddy:2.10.2 AS caddy
 
 FROM nvidia/cuda:13.0.3-cudnn-runtime-ubuntu24.04
@@ -34,7 +34,7 @@ RUN rm -rf /opt/comfyui/ComfyUI/custom_nodes/comfyform-helper/.git \
 
 COPY __init__.py pyproject.toml README.md /opt/comfyui/ComfyUI/custom_nodes/couchy-agent/
 COPY couchy_agent /opt/comfyui/ComfyUI/custom_nodes/couchy-agent/couchy_agent
-COPY cloud/start.sh cloud/Caddyfile /opt/couchy-cloud/
+COPY cloud/start.sh cloud/Caddyfile cloud/tls.py /opt/couchy-cloud/
 
 # Lockdown is on in this image: every ComfyUI route needs an agent key.
 ENV COUCHY_AGENT_LOCKDOWN=1 \
