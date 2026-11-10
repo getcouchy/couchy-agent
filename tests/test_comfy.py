@@ -25,6 +25,11 @@ class LoadTest(unittest.TestCase):
         fp.get_temp_directory = lambda: self.t.dirs["temp"]
         fp.get_user_directory = lambda: self.t.dirs["user"]
         fp.models_dir = self.t.dirs["models"]
+        m = self.t.dirs["models"]
+        fp.folder_names_and_paths = {
+            "checkpoints": ([os.path.join(m, "checkpoints")], {".safetensors"}),
+            "custom_nodes": ([os.path.join(self.t.base, "custom_nodes")], set()),
+        }
         fp.annotated_filepath = lambda name: (name, None)
         srv = types.ModuleType("server")
         self.app = web.Application(middlewares=[])
@@ -33,6 +38,7 @@ class LoadTest(unittest.TestCase):
         sys.modules.update(folder_paths=fp, server=srv)
 
     def tearDown(self):
+        self.doCleanups()
         for k, v in self.saved.items():
             if v is None:
                 sys.modules.pop(k, None)
@@ -49,12 +55,16 @@ class LoadTest(unittest.TestCase):
         sys.modules["couchy_agent_pack"] = mod
         with self.assertLogs("couchy_agent", "WARNING") as logs:
             spec.loader.exec_module(mod)
+        hasher = mod._agent.hasher
+        self.addCleanup(lambda: (hasher.stop(), hasher._thread.join(5)))  # before tearDown removes the tree
         self.assertFalse(hasattr(mod, "NODE_CLASS_MAPPINGS"))  # V3: nodes come from comfy_entrypoint
         self.assertTrue(callable(mod.comfy_entrypoint))
         self.assertEqual(mod._agent.scope_hook, "off")  # this folder_paths has none of the three functions
         self.assertEqual(len(self.app.middlewares), 1)
         paths = {r.resource.canonical for r in self.app.router.routes()}
-        self.assertTrue({"/couchy/pair", "/couchy/usage", "/api/couchy/files/adopt"} <= paths)
+        self.assertTrue({"/couchy/pair", "/couchy/usage", "/api/couchy/files/adopt", "/couchy/models",
+                         "/api/couchy/models/header", "/couchy/models/space"} <= paths)
+        self.assertTrue(mod._agent.hasher._thread.daemon)
         self.assertTrue(os.path.exists(os.path.join(self.t.dirs["user"], "couchy-agent", "pairing-code")))
         text = "\n".join(logs.output)
         self.assertIn("pairing code", text)

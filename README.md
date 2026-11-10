@@ -55,7 +55,17 @@ hashed, single use and valid 24 hours. Five wrong codes lock that client out for
 and all clients together get 30 tries a minute.
 
 A server can pair with more than one tenant, each with its own namespace. The agent keeps
-only each key's hash, bound to its namespace and a mode, in `user/couchy-agent/keys.json`.
+only each key's hash, bound to its namespace, a mode and a models grant, in
+`user/couchy-agent/keys.json`.
+
+A code grants `models: read`. To pair a Couchy that may also change this server's models
+(pull and delete, in a later release), print the code with the flag, on the host:
+
+```sh
+sudo -u comfy python -m couchy_agent pair --models write
+```
+
+No route can raise a key's models grant; only a code printed this way gives `write`.
 
 ## Keys
 
@@ -78,6 +88,21 @@ A key is `rw` or `ro` on its own namespace and nothing else.
   pre-prod pairs for its own `rw` namespace as well. Pre-prod's key then can't delete prod's
   files, whatever the API does.
 
+Each key also has a **models grant**, separate from its mode, because model files aren't
+namespaced: every tenant on the server shares `models/`, and deleting a checkpoint breaks
+every tenant's runs.
+
+| Grant | Can |
+| --- | --- |
+| `none` | Nothing under `/couchy/models` (403) |
+| `read` | The inventory, headers and space. Every pairing gets it unless the code says otherwise |
+| `write` | Also pull, delete and serve copies to peers (in a later release). Only `pair --models write` gives it |
+
+A key minted with `POST /couchy/keys` gets a models grant no higher than its minter's
+(`read` by default, or the minter's own when that's lower), so prod can mint pre-prod an
+`ro` key with `models: read`. Keys from before the grant read as `read`, and the agent writes
+that into `keys.json` on start.
+
 ## Routes
 
 All routes are also served under `/api/`, like ComfyUI's own. `folder` is `input` or
@@ -85,7 +110,7 @@ All routes are also served under `/api/`, like ComfyUI's own. `folder` is `input
 
 | Route | Does |
 | --- | --- |
-| `POST /couchy/pair {code, label}` | No key. Spends a code; answers `{namespace, key, keyId, mode: "rw"}`. 403 for a wrong, used or expired code, 429 when locked out |
+| `POST /couchy/pair {code, label}` | No key. Spends a code; answers `{namespace, key, keyId, mode: "rw", models}`. 403 for a wrong, used or expired code, 429 when locked out |
 | `GET /couchy/usage` | `{namespace, folders: {input, output: {count, bytes, owners: {<owner>: {count, bytes}}}}, permissions: "ok" \| "open", scope_hook: "on" \| "off", nodes: <version> \| null}`. Never file names. `nodes` is the version of [Couchy's nodes](#couchys-file-nodes) once they're registered, so the API knows it can swap them in |
 | `GET /couchy/files?folder&owner[&after][&limit]` | A page (at most 1000) of one owner's files: `{files: [{subfolder, filename, size, mtime}], total: {count, bytes}, next?}`. Pass `next` as `after` |
 | `POST /couchy/files/delete {folder, files: [{subfolder, filename}]}` | Answers `{deleted, missing, refused}`, each a list |
@@ -93,14 +118,79 @@ All routes are also served under `/api/`, like ComfyUI's own. `folder` is `input
 | `POST /couchy/files/delete {folder, olderThan}` | Deletes the namespace's files last changed more than `olderThan` seconds ago; answers `{deleted, bytes}` |
 | `POST /couchy/files/adopt {from: {folder, subfolder, filename}, owner, runId}` | Moves a file from `output` or `temp`, outside `couchy/`, into `output/couchy/<ns>/<owner>/<runId>/`. Answers `{state: "adopted", to: {folder, subfolder, filename}}`, `{state: "missing"}` (gone, as on a second adopt of the same file) or `{state: "refused"}` (another namespace, outside the folder, a symlink). A taken name gets `_1`, `_2` ... |
 | `POST /couchy/files/move-owner {from, to}` | Re-homes one owner's files in `input` and `output`; answers `{input: {moved}, output: {moved}}` |
-| `GET /couchy/keys` | The namespace's key ids, modes and labels |
-| `POST /couchy/keys {mode: "ro" \| "rw", label}` | Mints another key for the caller's namespace (`rw` caller only). Answers `{id, key, namespace, mode}` once; the key isn't kept |
+| `GET /couchy/keys` | The namespace's key ids, modes, models grants and labels |
+| `POST /couchy/keys {mode: "ro" \| "rw", label, models?}` | Mints another key for the caller's namespace (`rw` caller only). `models` is `none`, `read` or `write`, no higher than the caller's (403 otherwise). Answers `{id, key, namespace, mode, models}` once; the key isn't kept |
 | `POST /couchy/keys/revoke {id}` | Revokes another key of the namespace (`rw` caller only; not itself). Answers `{revoked}` |
 
 The path rules are those of couchyforms-helper's `files.py`: every path is resolved,
 symlinks included, and must stay inside its folder; symlinks are never listed; folders are
 never deleted. On top of that, inside `couchy/` only the key's namespace is reachable.
 Owners and run ids are letters, digits, `_` and `-`.
+
+## Models
+
+The models routes are read-only for now: what's on this host's disks, what a `.safetensors`
+file's header says, and how much room each volume has. The agent is mechanism only here too:
+it never decides what to keep, load or evict.
+
+### Locations and shares
+
+A file lives in a **location**: `host` is ComfyUI's own models folders (as `folder_paths`
+has them, `extra_model_paths.yaml` included), and a **share** is a model root mounted on this
+host, such as a NAS over CIFS or NFS, laid out like ComfyUI's `models/` (`checkpoints/`,
+`loras/`, ...). Set the shares on the host, as the account ComfyUI runs as:
+
+```sh
+sudo -u comfy python -m couchy_agent config --share nas-hot=/mnt/models-hot --share nas-cold=/mnt/models-cold
+sudo -u comfy python -m couchy_agent config                 # show them
+sudo -u comfy python -m couchy_agent config --clear-shares
+```
+
+`--share` repeats, and each call replaces the shares set before. They're kept in
+`user/couchy-agent/config.json` (`0600`), and the running agent picks a change up on its
+next scan. A share name is lowercase letters, digits, `-` and `_`, and never `host`. An
+`extra_model_paths.yaml` folder inside a share is listed under the share, not twice.
+
+`folder` is a ComfyUI models folder type as `folder_paths` names it (`checkpoints`, `loras`,
+`diffusion_models`, `text_encoders`, `vae`, ...), and `path` is relative to it, with `/`.
+A type with two directories (`text_encoders` is `text_encoders/` and `clip/`) lists the
+first match of a path, as ComfyUI loads it. Below a folder, symlinks are never listed,
+hashed or read, and nothing that resolves outside it is reached. A folder that is itself a
+symlink (`models/checkpoints` pointing at a bigger disk) is fine.
+
+### Routes
+
+All need a key whose models grant is `read` or `write`, and are also served under `/api/`.
+
+| Route | Does |
+| --- | --- |
+| `GET /couchy/models?[folder][&location][&after][&limit]` | A page (at most 1000) of model files, every folder and location unless narrowed: `{files: [{location, folder, path, size, mtime, sha256, verifiedAt}], next?}`. `sha256` and `verifiedAt` are null until the file is hashed. Pass `next` as `after` |
+| `GET /couchy/models/header?folder&path[&location]` | A `.safetensors` file's header, read from its first bytes: `{metadata, tensors: [{name, dtype, shape}], tensorCount, truncated}`. `location` defaults to `host`. At most 2000 tensors are listed. 422 for any other format and for a header over 1 MB; 404 for a missing file or a symlink |
+| `GET /couchy/models/space` | Each volume that holds a models folder: `{volumes: [{location, folders, freeBytes, totalBytes}]}` |
+
+A listing is the inventory as of the last scan: the host is scanned every minute and shares
+every five, so a NAS isn't walked on every page.
+
+### Hashing
+
+Hashing a 23 GB checkpoint takes minutes, so it never runs on a request. A background thread
+hashes new and changed files one at a time, at low priority (a niced thread on Linux), across
+`host` and every share, and keeps `{location, folder, path, size, mtime} → {sha256,
+verifiedAt}` in `user/couchy-agent/models-index.json` (`0600`). After a restart only files
+whose size or mtime changed are hashed again.
+
+Each file is **re-verified weekly** by hashing it again. A match sets `verifiedAt`. A mismatch
+(the bytes changed under the same size and mtime) clears `sha256` and `verifiedAt`, logs
+`model verify mismatch` as a warning, and leaves the file unhashed until it changes. A share
+that turns up empty or missing (a mount that failed) keeps its hashes until it's back.
+
+### Logging
+
+The models lines are JSON, one object per line on ComfyUI's console, each with
+`service: "couchy-agent"`, `version` and `server` (the host name). They name a file by its
+location, folder and the first 12 hex characters of its SHA-256 (`sha`), with `bytes` and
+`ms`, and never by its path. The same keys the Couchy API drops (`path`, `filename`, `token`,
+...) are dropped from them at any depth.
 
 ## The guard on ComfyUI's own routes
 

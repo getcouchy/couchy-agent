@@ -20,8 +20,11 @@ import os
 import folder_paths
 from server import PromptServer
 
-from . import hook, perms
+from . import hook, models, obs, perms
 from . import scope as scope_mod
+from .config import Config
+from .hashing import Hasher, Index
+from .models_routes import ModelsRoutes
 from .routes import Agent, Folders
 from .store import Store, format_code
 
@@ -41,6 +44,12 @@ def _dirs():
     }
 
 
+def _host_models(share_roots):
+    """The host's model folders as folder_paths has them now, including
+    extra_model_paths.yaml entries outside models/."""
+    return models.host_folders(folder_paths.folder_names_and_paths, share_roots)
+
+
 def _display_name(class_type):
     try:
         import nodes
@@ -52,7 +61,15 @@ def _display_name(class_type):
 def setup():
     store = Store(folder_paths.get_user_directory())
     store.ensure_dir()
-    agent = Agent(store, Folders(_dirs, folder_paths.annotated_filepath))
+    store.migrate()  # keys from before the models grant get models: read
+    obs.models_logger()
+    config = Config(store)
+    locations = models.Locations(_host_models, config.shares)
+    index = Index(store)
+    hasher = Hasher(locations, index)
+    agent = Agent(store, Folders(_dirs, folder_paths.annotated_filepath), models=ModelsRoutes(locations, index, hasher))
+    agent.hasher = hasher
+    hasher.start()
 
     app = PromptServer.instance.app
     app.middlewares.append(agent.middleware())

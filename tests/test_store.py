@@ -45,7 +45,7 @@ class StoreTest(unittest.TestCase):
         self.assertTrue(out["namespace"].startswith("ns_"))
         self.assertEqual(out["mode"], "rw")
         self.assertEqual(self.s.authenticate(out["key"]),
-                         {"id": out["keyId"], "namespace": out["namespace"], "mode": "rw"})
+                         {"id": out["keyId"], "namespace": out["namespace"], "mode": "rw", "models": "read"})
         self.assertTrue(self.s.paired())
         self.assertEqual(self.mode("keys.json"), 0o600)
         with open(os.path.join(self.s.dir, "keys.json")) as f:
@@ -83,7 +83,7 @@ class StoreTest(unittest.TestCase):
     def test_read_only_keys_and_revoking(self):
         a = self.s.redeem(self.s.mint_code(), "prod")
         ro = self.s.mint_key(a["namespace"], "ro", "pre-prod reads prod")
-        self.assertEqual(self.s.authenticate(ro["key"]), {"id": ro["id"], "namespace": a["namespace"], "mode": "ro"})
+        self.assertEqual(self.s.authenticate(ro["key"]), {"id": ro["id"], "namespace": a["namespace"], "mode": "ro", "models": "read"})
         self.assertEqual([k["mode"] for k in self.s.list_keys(a["namespace"])], ["rw", "ro"])
         self.assertNotIn(ro["key"], repr(self.s.list_keys()))
         self.assertTrue(self.s.revoke_key(a["namespace"], ro["id"]))
@@ -103,6 +103,33 @@ class StoreTest(unittest.TestCase):
         self.assertIsNotNone(other.authenticate(a["key"]))  # warm its cache
         ro = self.s.mint_key(a["namespace"], "ro")
         self.assertIsNotNone(other.authenticate(ro["key"]))
+
+
+    def test_pair_models_write_grants_write_and_the_next_code_reads(self):
+        w = self.s.redeem(self.s.mint_code(models="write"), "prod")
+        self.assertEqual((w["models"], self.s.authenticate(w["key"])["models"]), ("write", "write"))
+        r = self.s.redeem(self.s.mint_code(), "pre-prod")
+        self.assertEqual(r["models"], "read")
+        self.assertEqual(self.s.redeem(self.s.mint_code_if_none(), "x")["models"], "read")
+        with self.assertRaises(ValueError):
+            self.s.mint_code(models="admin")
+
+    def test_existing_keys_migrate_to_read(self):
+        out = self.s.redeem(self.s.mint_code(), "prod")
+        path = os.path.join(self.s.dir, "keys.json")
+        with open(path) as f:
+            data = json.load(f)
+        for e in data["keys"].values():
+            del e["models"]  # a keys.json from before the models grant
+        with open(path, "w") as f:
+            json.dump(data, f)
+        self.assertEqual(self.s.authenticate(out["key"])["models"], "read")
+        self.assertEqual([k["models"] for k in self.s.list_keys()], ["read"])
+        self.assertTrue(self.s.migrate())
+        with open(path) as f:
+            self.assertEqual([e["models"] for e in json.load(f)["keys"].values()], ["read"])
+        self.assertFalse(self.s.migrate())
+        self.assertEqual(self.mode("keys.json"), 0o600)
 
 
 class LockoutTest(unittest.TestCase):
