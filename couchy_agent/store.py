@@ -4,7 +4,9 @@ couchy-agent/ (0700, files 0600). Plain Python, no ComfyUI imports.
 - pairing-code: the one outstanding code, in plain text, for the operator.
 - pairing.json: that code's hash and expiry. Codes are single use.
 - keys.json: namespaces and the hashes of their keys, each bound to its
-  namespace and a mode, rw or ro. A key itself is never stored.
+  namespace, a mode (rw or ro) and a models grant (none, read or write).
+  A key itself is never stored. Keys from before the models grant read as
+  models: read.
 
 Every change takes an flock on .lock, so `python -m couchy_agent pair` and a
 running ComfyUI can share the files.
@@ -27,6 +29,15 @@ CODE_LEN = 12
 CODE_TTL = 24 * 3600
 
 MODES = ("rw", "ro")
+
+# The models grant, separate from the mode: what a key may do under
+# /couchy/models. Shared by every tenant, since models/ isn't namespaced.
+MODELS_GRANTS = ("none", "read", "write")
+DEFAULT_MODELS = "read"
+
+
+def models_rank(grant):
+    return MODELS_GRANTS.index(grant)
 
 KEY_PREFIX = "cak_"
 
@@ -111,15 +122,19 @@ class Store:
         p = self._read_json("pairing.json", {})
         return bool(p.get("hash")) and p.get("expires", 0) > self.clock()
 
-    def mint_code(self):
+    def mint_code(self, models=DEFAULT_MODELS):
         """A fresh code, replacing any outstanding one. Written to
-        pairing-code for the operator; only its hash is kept for checking."""
+        pairing-code for the operator; only its hash is kept for checking.
+        models is the grant the key it pairs gets: only the host's own
+        `pair --models write` asks for write."""
+        if models not in MODELS_GRANTS:
+            raise ValueError("models must be none, read or write")
         with self._locked():
-            return self._mint_code()
+            return self._mint_code(models)
 
-    def _mint_code(self):
+    def _mint_code(self, models=DEFAULT_MODELS):
         code = new_code()
-        self._write_json("pairing.json", {"hash": _hash(code), "expires": self.clock() + CODE_TTL})
+        self._write_json("pairing.json", {"hash": _hash(code), "expires": self.clock() + CODE_TTL, "models": models})
         self._write("pairing-code", format_code(code) + "\n")
         return code
 
@@ -142,15 +157,18 @@ class Store:
                 return None
             if not hmac.compare_digest(p["hash"], _hash(given)):
                 return None
+            models = p.get("models", DEFAULT_MODELS)
+            if models not in MODELS_GRANTS:
+                models = DEFAULT_MODELS
             self._write_json("pairing.json", {})
             with contextlib.suppress(FileNotFoundError):
                 os.remove(self._path("pairing-code"))
             data = self._load_keys()
             ns = _new_id("ns_", 8)
             data["namespaces"][ns] = {"label": _label(label), "created": int(self.clock())}
-            key = self._add_key(data, ns, "rw", _label(label))
+            key = self._add_key(data, ns, "rw", _label(label), models)
             self._save_keys(data)
-        return {"namespace": ns, "key": key["key"], "keyId": key["id"], "mode": "rw"}
+        return {"namespace": ns, "key": key["key"], "keyId": key["id"], "mode": "rw", "models": models}
 
     # Keys ------------------------------------------------------------------
 
@@ -164,11 +182,11 @@ class Store:
         self._write_json("keys.json", data)
         self._keys_cache = None
 
-    def _add_key(self, data, ns, mode, label):
+    def _add_key(self, data, ns, mode, label, models):
         secret = KEY_PREFIX + secrets.token_urlsafe(32)
         kid = _new_id("key_", 6)
         data["keys"][_hash(secret)] = {
-            "id": kid, "namespace": ns, "mode": mode, "label": label, "created": int(self.clock()),
+            "id": kid, "namespace": ns, "mode": mode, "models": models, "label": label, "created": int(self.clock()),
         }
         return {"id": kid, "key": secret}
 
@@ -185,35 +203,54 @@ class Store:
         return self._keys_cache[1]
 
     def authenticate(self, secret):
-        """The grant a key carries, {id, namespace, mode}, or None."""
+        """The grant a key carries, {id, namespace, mode, models}, or None."""
         if not isinstance(secret, str) or not secret.startswith(KEY_PREFIX):
             return None
         entry = self._keys()["keys"].get(_hash(secret))
         if entry is None or entry["namespace"] not in self._keys()["namespaces"]:
             return None
-        return {"id": entry["id"], "namespace": entry["namespace"], "mode": entry["mode"]}
+        return {"id": entry["id"], "namespace": entry["namespace"], "mode": entry["mode"], "models": _models(entry)}
 
     def paired(self):
         return bool(self._keys()["namespaces"])
 
-    def mint_key(self, namespace, mode, label=""):
+    def mint_key(self, namespace, mode, label="", models=DEFAULT_MODELS):
         """Another key for an existing namespace (an ro grant for pre-prod).
-        Answers {id, key, namespace, mode}."""
+        The caller checks that models is no higher than its own grant.
+        Answers {id, key, namespace, mode, models}."""
         if mode not in MODES:
             raise ValueError("mode must be rw or ro")
+        if models not in MODELS_GRANTS:
+            raise ValueError("models must be none, read or write")
         with self._locked():
             data = self._load_keys()
             if namespace not in data["namespaces"]:
                 raise KeyError(namespace)
-            key = self._add_key(data, namespace, mode, _label(label))
+            key = self._add_key(data, namespace, mode, _label(label), models)
             self._save_keys(data)
-        return {"id": key["id"], "key": key["key"], "namespace": namespace, "mode": mode}
+        return {"id": key["id"], "key": key["key"], "namespace": namespace, "mode": mode, "models": models}
+
+    def migrate(self):
+        """Write models: read into keys from before the models grant, so
+        keys.json says what every key may do. Reading them already treats a
+        missing grant as read; this only makes it explicit."""
+        with self._locked():
+            data = self._load_keys()
+            changed = False
+            for e in data["keys"].values():
+                if e.get("models") not in MODELS_GRANTS:
+                    e["models"] = DEFAULT_MODELS
+                    changed = True
+            if changed:
+                self._save_keys(data)
+            return changed
 
     def list_keys(self, namespace=None):
         """Key ids, modes and labels; never the keys or their hashes."""
         data = self._load_keys()
         out = [
-            {"id": e["id"], "namespace": e["namespace"], "mode": e["mode"], "label": e.get("label", ""),
+            {"id": e["id"], "namespace": e["namespace"], "mode": e["mode"], "models": _models(e),
+             "label": e.get("label", ""),
              "created": e.get("created")}
             for e in data["keys"].values()
             if namespace is None or e["namespace"] == namespace
@@ -233,6 +270,11 @@ class Store:
                     self._save_keys(data)
                     return True
         return False
+
+
+def _models(entry):
+    m = entry.get("models")
+    return m if m in MODELS_GRANTS else DEFAULT_MODELS
 
 
 def _label(label):

@@ -1,7 +1,7 @@
 [project]
 name = "couchy-agent"
-description = "Keeps each Couchy tenant's files on a ComfyUI server in its own namespace: pairing, keys, /couchy routes and a guard on ComfyUI's /view, /upload and /prompt."
-version = "0.1.0"
+description = "Keeps each Couchy tenant's files on a ComfyUI server in its own namespace (pairing, keys, /couchy routes, a guard on /view, /upload and /prompt), and reports the host's model files, hashes and space."
+version = "0.2.0"
 requires-python = ">=3.10"
 dependencies = []
 

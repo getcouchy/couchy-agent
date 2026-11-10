@@ -11,7 +11,7 @@ import os
 from aiohttp import web
 
 from . import files, guard, perms
-from .store import Lockout
+from .store import DEFAULT_MODELS, MODELS_GRANTS, Lockout, models_rank
 
 log = logging.getLogger("couchy_agent")
 
@@ -66,10 +66,11 @@ def _client(request):
 
 
 class Agent:
-    def __init__(self, store, folders, lockout=None):
+    def __init__(self, store, folders, lockout=None, models=None):
         self.store = store
         self.folders = folders
         self.lockout = lockout or Lockout()
+        self.models = models  # models_routes.ModelsRoutes, or None
 
     def grant(self, request):
         return self.store.authenticate(request_key(request))
@@ -87,6 +88,8 @@ class Agent:
             router.add_get(prefix + "/couchy/keys", self.list_keys)
             router.add_post(prefix + "/couchy/keys", self.mint_key)
             router.add_post(prefix + "/couchy/keys/revoke", self.revoke_key)
+        if self.models is not None:
+            self.models.add_routes(router, self._need)
 
     def _need(self, request, write=False):
         g = self.grant(request)
@@ -198,8 +201,18 @@ class Agent:
         mode = body.get("mode", "ro")
         if mode not in ("rw", "ro"):
             raise web.HTTPBadRequest(text="mode must be rw or ro")
-        out = await asyncio.to_thread(self.store.mint_key, g["namespace"], mode, body.get("label", ""))
-        log.info("couchy-agent: minted %s key %s for %s", mode, out["id"], g["namespace"])
+        # The models grant is no higher than the minter's: by default read,
+        # or the minter's own when that is lower.
+        mine = g.get("models", DEFAULT_MODELS)
+        models = body.get("models", min(DEFAULT_MODELS, mine, key=models_rank))
+        if models not in MODELS_GRANTS:
+            raise web.HTTPBadRequest(text="models must be none, read or write")
+        if models_rank(models) > models_rank(mine):
+            log.warning("couchy-agent: refused minting a models %s key with key %s (models %s)", models, g["id"], mine)
+            raise web.HTTPForbidden(text=json.dumps({"error": f"this key's models grant is {mine}; a key it mints can't have more"}),
+                                    content_type="application/json")
+        out = await asyncio.to_thread(self.store.mint_key, g["namespace"], mode, body.get("label", ""), models)
+        log.info("couchy-agent: minted %s key %s (models %s) for %s", mode, out["id"], models, g["namespace"])
         return web.json_response(out)
 
     async def revoke_key(self, request):

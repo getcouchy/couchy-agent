@@ -4,7 +4,7 @@ The code is in the couchy_agent package, which tests import without ComfyUI."""
 
 from .couchy_agent.comfy import setup
 
-setup()
+_agent = setup()
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
