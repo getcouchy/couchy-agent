@@ -58,6 +58,27 @@ class MainTest(unittest.TestCase):
         self.run_main("config", "--clear-shares")
         self.assertEqual(Config(self.store).shares(), {})
 
+    def test_config_allowed_hosts_pickle_and_reserve(self):
+        code, out, _ = self.run_main("config")
+        self.assertIn("allowed-hosts: none", out)
+        self.assertIn("allow-pickle: no", out)
+        self.assertIn("reserve: 20 GB", out)
+        hot = os.path.join(self.t.base, "hot")
+        os.makedirs(hot)
+        self.run_main("config", "--share", f"nas-hot={hot}")
+        code, out, _ = self.run_main("config", "--allowed-host", "Models.Example.com", "--allowed-host", "10.0.0.5",
+                                     "--allow-pickle", "--reserve-gb", "50")
+        self.assertEqual(code, 0)
+        c = Config(self.store).load()
+        self.assertEqual((c["allowedHosts"], c["allowPickle"], c["reserveBytes"]),
+                         (["models.example.com", "10.0.0.5"], True, 50 * 10**9))
+        self.assertEqual(c["shares"], {"nas-hot": hot})  # the rest is kept
+        self.assertEqual(self.run_main("config", "--allowed-host", "https://x.com/path")[0], 2)
+        self.assertEqual(self.run_main("config", "--reserve-gb", "-1")[0], 2)
+        self.run_main("config", "--no-allow-pickle", "--clear-allowed-hosts")
+        c = Config(self.store).load()
+        self.assertEqual((c["allowedHosts"], c["allowPickle"]), ([], False))
+
     def test_a_hand_edited_config_cannot_add_host_or_a_relative_path(self):
         self.store.ensure_dir()
         with open(os.path.join(self.store.dir, "config.json"), "w") as f:

@@ -56,6 +56,10 @@ LAYOUT = {
     "audio_encoders": ["audio_encoders"],
 }
 
+# Where pulls stream before they're renamed into place (pulls.py). Never
+# listed, hashed or served.
+PARTIAL = ".couchy-partial"
+
 # folder_paths types that aren't model folders.
 NOT_MODELS = ("custom_nodes",)
 
@@ -90,9 +94,10 @@ class Locations:
     """The locations now, read each time: the host from a callable (ComfyUI
     can add paths) and the shares from the config."""
 
-    def __init__(self, host, shares=lambda: {}):
+    def __init__(self, host, shares=lambda: {}, host_root=None):
         self._host = host
         self._shares = shares
+        self._host_root = host_root  # ComfyUI's models dir, or a callable answering it
 
     def all(self):
         """{location: {folder: [dirs]}}, host first, shares by name."""
@@ -105,6 +110,13 @@ class Locations:
 
     def is_share(self, location):
         return location != HOST
+
+    def root(self, location):
+        """The location's models root: the share's path, or ComfyUI's
+        models dir for host (None when it wasn't given)."""
+        if location == HOST:
+            return self._host_root() if callable(self._host_root) else self._host_root
+        return self._shares().get(location)
 
 
 def _within(real_root, path):
@@ -122,7 +134,8 @@ def walk_folder(dirs):
         if not os.path.isdir(d):
             continue
         for dirpath, dirnames, filenames in os.walk(d):
-            dirnames[:] = [n for n in dirnames if not os.path.islink(os.path.join(dirpath, n))]
+            dirnames[:] = [n for n in dirnames
+                           if n != PARTIAL and not os.path.islink(os.path.join(dirpath, n))]
             rel_dir = os.path.relpath(dirpath, d)
             for fn in filenames:
                 full = os.path.join(dirpath, fn)
@@ -200,15 +213,25 @@ def list_models(locations, index, location=None, folder=None, after="", limit=MA
     return out
 
 
+def split_path(path):
+    """A model path's parts, or None: a plain relative path with /, no
+    empty, . or .. parts, no backslash or NUL, and nothing under
+    .couchy-partial."""
+    if not isinstance(path, str) or not path or "\0" in path or "\\" in path:
+        return None
+    parts = path.split("/")
+    if path.startswith("/") or any(p in ("", ".", "..") for p in parts) or PARTIAL in parts:
+        return None
+    return parts
+
+
 def resolve(dirs, path):
     """The real path of a model file of one folder type, searched in
     ComfyUI's order, or None. Refused: anything but a plain relative path,
     any symlink on the way (the file or a directory under the folder's own
     directory) and anything outside the directory."""
-    if not isinstance(path, str) or not path or "\0" in path or "\\" in path:
-        return None
-    parts = path.split("/")
-    if path.startswith("/") or any(p in ("", ".", "..") for p in parts):
+    parts = split_path(path)
+    if parts is None:
         return None
     for d in dirs:
         if not os.path.isdir(d):
