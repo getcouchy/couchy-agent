@@ -11,6 +11,9 @@ no route reads or writes it.
   .bin), which run code when ComfyUI loads them. Off by default.
 - reserveBytes: the free space a pull must leave on its volume (default
   20 GB).
+- indexDir: an absolute folder for the models hash index instead of
+  user/couchy-agent/, such as one beside a models folder on a network
+  volume that outlives the host. Read at start.
 
 The running agent re-reads the file when it changes, so a new share shows up
 on the next scan without a restart.
@@ -96,7 +99,11 @@ def _clean(data):
     reserve = data.get("reserveBytes")
     if not isinstance(reserve, int) or isinstance(reserve, bool) or reserve < 0:
         reserve = DEFAULT_RESERVE
+    index_dir = data.get("indexDir")
+    if not isinstance(index_dir, str) or not os.path.isabs(index_dir):
+        index_dir = None
     return {
+        "indexDir": os.path.normpath(index_dir) if index_dir else None,
         "shares": valid_shares(data.get("shares")),
         "allowedHosts": valid_hosts(data.get("allowedHosts")),
         "allowPickle": data.get("allowPickle") is True,
@@ -141,6 +148,9 @@ class Config:
 
     def reserve_bytes(self):
         return self.load()["reserveBytes"]
+
+    def index_dir(self):
+        return self.load()["indexDir"]
 
     def set(self, **changes):
         """Change some keys (shares, allowedHosts, allowPickle,

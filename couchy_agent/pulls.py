@@ -1,5 +1,5 @@
-"""Pulls: a model file fetched from Civitai, Hugging Face or a peer agent
-into a location (host or a share), verified, then renamed into place.
+"""Pulls: a model file fetched from Civitai, Hugging Face, a peer agent or
+a bucket (a presigned URL) into a location (host or a share), verified, then renamed into place.
 
 Mechanism only: the API says what to fetch and where. The agent refuses
 what its host doesn't allow (formats, hosts, room) and never evicts.
@@ -12,7 +12,10 @@ what its host doesn't allow (formats, hosts, room) and never evicts.
   same pull again after a restart (when the pull answers 404) resumes from
   the partial file, with Range when the source allows it.
 - At most two pulls run at once; the rest queue.
-- Credentials (headers, a Civitai token in the URL, a peer's ticket) live
+- A presigned URL (a bucket object, minted by the API for this pull) is
+  fetched only from a host in allowed-hosts, and never follows a redirect.
+- Credentials (headers, a Civitai token in the URL, a peer's ticket, a
+  presigned URL and its signature) live
   in the Pull in memory for that pull only. They're never written to disk
   or logged, and never sent on to another host on a redirect.
 """
@@ -90,17 +93,33 @@ def _under(host, name):
     return host == name or host.endswith("." + name)
 
 
-def host_allowed(url, allowed=()):
-    """A URL a pull may fetch: a known host over HTTPS, or a host in the
-    host's allowed-hosts (or a subdomain of one) over HTTP or HTTPS."""
+def _url_host(url):
+    """(scheme, host) of an http(s) URL with no user info, else None."""
     try:
         u = urllib.parse.urlsplit(url)
         host = (u.hostname or "").lower().rstrip(".")
     except ValueError:
-        return False
+        return None
     if u.scheme not in ("http", "https") or not host or u.username or u.password:
+        return None
+    return u.scheme, host
+
+
+def in_allowed_hosts(url, allowed):
+    """The URL's host is in allowed-hosts, or under one: the only check a
+    presigned URL gets, since no bucket host is known in advance."""
+    sh = _url_host(url)
+    return sh is not None and any(_under(sh[1], a) for a in allowed)
+
+
+def host_allowed(url, allowed=()):
+    """A URL a pull may fetch: a known host over HTTPS, or a host in the
+    host's allowed-hosts (or a subdomain of one) over HTTP or HTTPS."""
+    sh = _url_host(url)
+    if sh is None:
         return False
-    if u.scheme == "https" and (any(_under(host, k) for k in KNOWN_HOSTS) or any(p.match(host) for p in KNOWN_CDNS)):
+    scheme, host = sh
+    if scheme == "https" and (any(_under(host, k) for k in KNOWN_HOSTS) or any(p.match(host) for p in KNOWN_CDNS)):
         return True
     return any(_under(host, a) for a in allowed)
 
@@ -185,10 +204,19 @@ class Pull:
         return {"pull": self.id, "location": self.location, "folder": self.folder, "sha": sha12(self.sha256), **more}
 
 
+SOURCES = "source must be {url, headers?}, {peer, ticket} or {presigned}"
+
+
 def parse_source(source):
-    """{url, headers?} or {peer, ticket}, checked for shape only."""
+    """{url, headers?}, {peer, ticket} or {presigned}, checked for shape
+    only."""
     if not isinstance(source, dict):
-        raise BadPull("source must be {url, headers?} or {peer, ticket}")
+        raise BadPull(SOURCES)
+    if "presigned" in source:
+        url = source.get("presigned")
+        if not isinstance(url, str) or not url:
+            raise BadPull("source.presigned must be a URL")
+        return {"presigned": url}
     if "url" in source:
         url, headers = source.get("url"), source.get("headers") or {}
         if not isinstance(url, str) or not url:
@@ -202,7 +230,7 @@ def parse_source(source):
         if not isinstance(peer, str) or not peer or not isinstance(ticket, str) or not ticket:
             raise BadPull("a peer source is {peer: <agent URL>, ticket}")
         return {"peer": peer, "ticket": ticket}
-    raise BadPull("source must be {url, headers?} or {peer, ticket}")
+    raise BadPull(SOURCES)
 
 
 class Pulls:
@@ -330,7 +358,8 @@ class Pulls:
             log.warning("model pull failed", extra=pull._fields(error=error, bytes=pull.bytes_done, ms=ms))
 
     def _request(self, pull):
-        """(url, headers, peer) for the pull, or Failed for what the host
+        """(url, headers, kind) for the pull, kind being url, peer or
+        presigned, or Failed for what the host
         refuses."""
         fmt = file_format(pull.path)
         if fmt is None:
@@ -343,19 +372,23 @@ class Pulls:
             u = urllib.parse.urlsplit(base)
             if u.scheme not in ("http", "https") or not u.hostname or u.query or u.fragment or u.username:
                 raise Failed("bad_source")
-            return base + "/couchy/models/blob/" + pull.sha256, {TICKET_HEADER: src["ticket"]}, True
+            return base + "/couchy/models/blob/" + pull.sha256, {TICKET_HEADER: src["ticket"]}, "peer"
+        if "presigned" in src:
+            if not in_allowed_hosts(src["presigned"], self.config.allowed_hosts()):
+                raise Failed("host_not_allowed")
+            return src["presigned"], {}, "presigned"
         if not host_allowed(src["url"], self.config.allowed_hosts()):
             raise Failed("host_not_allowed")
-        return src["url"], dict(src["headers"]), False
+        return src["url"], dict(src["headers"]), "url"
 
     async def _fetch(self, pull, request):
-        url, headers, peer = request
+        url, headers, kind = request
         target, partial, have, sha = await asyncio.to_thread(self._prepare, pull)
         if target is None:
             return  # the same file is already there
         resp = None
         try:
-            resp = await self._open(url, headers, peer, have)
+            resp = await self._open(url, headers, kind, have)
             if resp.status == 206 and have and _range_start(resp) == have:
                 pass  # resuming
             elif resp.status == 416 and have == pull.size:
@@ -366,11 +399,11 @@ class Pulls:
                     await asyncio.to_thread(_truncate, partial)
                 if resp.status != 200:
                     resp.release()
-                    resp = await self._open(url, headers, peer, 0)
+                    resp = await self._open(url, headers, kind, 0)
                     if resp.status != 200:
-                        raise Failed(_refusal(resp.status, peer), keep_partial=True)
+                        raise Failed(_refusal(resp.status, kind), keep_partial=True)
             else:
-                raise Failed(_refusal(resp.status, peer), keep_partial=True)
+                raise Failed(_refusal(resp.status, kind), keep_partial=True)
             pull.bytes_done = have
             if resp.status in (200, 206):
                 await self._stream(pull, resp, partial, sha)
@@ -384,7 +417,7 @@ class Pulls:
             raise Failed("hash_mismatch")
         await asyncio.to_thread(self._place, pull, partial, target)
 
-    async def _open(self, url, headers, peer, offset):
+    async def _open(self, url, headers, kind, offset):
         """GET url, following redirects by hand: each hop's host is checked
         again, and credentials go only to the URL's own origin."""
         session = self._http()
@@ -400,7 +433,7 @@ class Pulls:
                 return resp
             location = resp.headers.get("Location", "")
             resp.release()
-            if peer or not location:
+            if kind != "url" or not location:  # a peer or a presigned URL never redirects
                 raise Failed("source_failed")
             url = urllib.parse.urljoin(url, location)
             if not host_allowed(url, allowed):
@@ -532,10 +565,10 @@ def _is_client_error(e):
     return isinstance(e, aiohttp.ClientError)
 
 
-def _refusal(status, peer):
+def _refusal(status, kind):
     """The error for a source that answered status. The partial file stays:
     a new ticket or a fixed token resumes it."""
-    if peer and status in (401, 403):
+    if kind == "peer" and status in (401, 403):
         return "ticket_refused"
     if status in (404, 410):
         return "not_found"

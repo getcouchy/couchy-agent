@@ -32,6 +32,18 @@ def _default_user_dir(cmd):
     return state if cmd == "store" or os.path.isdir(state) else comfy
 
 
+def _index_dir(path):
+    """An absolute folder for the hash index, made 0700 when missing."""
+    if not os.path.isabs(path):
+        raise ValueError(f"--index-dir must be absolute: {path!r}")
+    path = os.path.normpath(path)
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+    except OSError as e:
+        raise ValueError(f"can't make {path}: {e.strerror}")
+    return path
+
+
 def _shares(texts):
     """{name: path} from --share flags, or an error message."""
     shares = {}
@@ -68,11 +80,17 @@ def main(argv=None):
     pickle.add_argument("--no-allow-pickle", dest="allow_pickle", action="store_false")
     cfg.add_argument("--reserve-gb", type=float, default=None,
                      help="free space a pull must leave on its volume, in GB (default 20)")
+    cfg.add_argument("--index-dir", default=None, metavar="PATH",
+                     help="keep the models hash index in this folder, such as one beside a models folder on a "
+                          "network volume (read when ComfyUI starts)")
+    cfg.add_argument("--clear-index-dir", action="store_true", help="keep the index in user/couchy-agent again")
     st = sub.add_parser("store", help="serve the models routes and pairing without ComfyUI (store mode)")
     st.add_argument("--root", required=True, help="the models root, in ComfyUI's layout (checkpoints/, loras/, ...)")
     st.add_argument("--listen", default=None, help="host:port (default 127.0.0.1:8190)")
     st.add_argument("--share", action="append", default=None, metavar="NAME=PATH",
                     help="another model root on this host, for this run (default: the config's shares)")
+    st.add_argument("--index-dir", default=None, metavar="PATH",
+                    help="keep the models hash index in this folder (default: the config's, else the state folder)")
     args = p.parse_args(argv)
 
     user_dir = args.user_directory or _default_user_dir(args.cmd)
@@ -92,10 +110,11 @@ def main(argv=None):
         try:
             shares = _shares(args.share) if args.share else None
             standalone.parse_listen(args.listen or standalone.DEFAULT_LISTEN)
+            index_dir = _index_dir(args.index_dir) if args.index_dir else None
         except ValueError as e:
             print(e, file=sys.stderr)
             return 2
-        standalone.run(user_dir, args.root, args.listen or standalone.DEFAULT_LISTEN, shares)
+        standalone.run(user_dir, args.root, args.listen or standalone.DEFAULT_LISTEN, shares, index_dir)
         return 0
 
     if args.cmd == "pair":
@@ -113,6 +132,10 @@ def main(argv=None):
                 changes["shares"] = _shares(args.share)
             if args.clear_allowed_hosts or args.allowed_host:
                 changes["allowedHosts"] = [parse_host(h) for h in args.allowed_host or []]
+            if args.clear_index_dir:
+                changes["indexDir"] = None
+            elif args.index_dir:
+                changes["indexDir"] = _index_dir(args.index_dir)
         except ValueError as e:
             print(e, file=sys.stderr)
             return 2
@@ -125,7 +148,8 @@ def main(argv=None):
             changes["reserveBytes"] = int(args.reserve_gb * 10**9)
         if changes:
             config.set(**changes)
-            print("Saved. The running agent picks it up on its next scan or pull.", file=sys.stderr)
+            print("Saved. The running agent picks it up on its next scan or pull"
+                  + ("; restart ComfyUI for the index dir." if "indexDir" in changes else "."), file=sys.stderr)
         now = config.load()
         if not now["shares"]:
             print("shares: none")
@@ -134,6 +158,7 @@ def main(argv=None):
         print("allowed-hosts: " + (", ".join(now["allowedHosts"]) or "none (Civitai and Hugging Face only)"))
         print(f"allow-pickle: {'yes' if now['allowPickle'] else 'no'}")
         print(f"reserve: {now['reserveBytes'] / 10**9:g} GB")
+        print(f"index-dir: {now['indexDir'] or 'none (user/couchy-agent)'}")
         return 0
 
     if args.cmd == "keys":

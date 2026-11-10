@@ -102,6 +102,39 @@ class HashingTest(unittest.TestCase):
         self.assertEqual(len(hashed), 3)
         self.assertEqual(self.listing(h.index)[("host", "checkpoints", "b.safetensors")][0], sha(b"changed"))
 
+    def test_an_index_dir_survives_a_new_host(self):
+        """The RunPod case: the models folder and its index are on a volume;
+        a new pod has a fresh user folder and rehashes only what changed."""
+        vol = self.t.path("models/.couchy-index")
+        self.t.write("models/checkpoints/a.safetensors", b"aaaa")
+        self.t.write("models/checkpoints/b.safetensors", b"bbbb")
+        h = Hasher(self.locations, Index(self.store, vol), clock=self.clock, chunk=3)
+        self.assertEqual(self.drain(h), 2)
+        path = os.path.join(vol, "models-index.json")
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertFalse(os.path.exists(os.path.join(self.store.dir, "models-index.json")))
+        self.assertEqual([n for n in os.listdir(vol) if n.endswith(".tmp")], [])  # written then renamed
+        self.t.write("models/checkpoints/b.safetensors", b"changed!")
+        os.utime(self.t.path("models/checkpoints/b.safetensors"), (5, 5))
+        other = os.path.join(self.t.base, "pod-2-user")
+        os.makedirs(other)
+        h2 = Hasher(self.locations, Index(Store(other), vol), clock=self.clock, chunk=3)
+        h2.scan(force=True)
+        self.assertEqual([(p[1], p[2]) for p in h2.pending()], [("checkpoints", "b.safetensors")])
+        self.assertEqual(h2.index.get("host", "checkpoints", "a.safetensors")["sha256"], sha(b"aaaa"))
+        # The index dir isn't a models folder: never listed or hashed.
+        self.assertFalse(any(".couchy-index" in k[2] for k in h2.index.shas()))
+
+    def test_an_unreadable_index_is_rebuilt(self):
+        self.t.write("models/checkpoints/a.safetensors", b"aaaa")
+        self.store.ensure_dir()
+        with open(os.path.join(self.store.dir, "models-index.json"), "w") as f:
+            f.write("{not json")
+        h = self.hasher()
+        self.assertIn("models index unreadable", self.logs.getvalue())
+        self.assertEqual(self.drain(h), 1)
+        self.assertEqual(Index(self.store).get("host", "checkpoints", "a.safetensors")["sha256"], sha(b"aaaa"))
+
     def test_weekly_verify_sets_verified_at(self):
         self.t.write("nas-cold/checkpoints/a.safetensors", b"aaaa")
         h = self.hasher()
