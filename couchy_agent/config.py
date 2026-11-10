@@ -7,6 +7,8 @@ no route reads or writes it.
   its own location next to ComfyUI's own models root, which is "host".
 - allowedHosts: [host], hosts a pull may fetch from beyond the known ones
   (pulls.KNOWN_HOSTS). "example.com" also allows its subdomains.
+  COUCHY_AGENT_ALLOWED_HOSTS (comma-separated) adds to them, so a cloud GPU
+  Couchy starts can fetch from the workspace's buckets.
 - allowPickle: true lets a pull fetch pickle formats (.ckpt, .pt, .pth,
   .bin), which run code when ComfyUI loads them. Off by default.
 - reserveBytes: the free space a pull must leave on its volume (default
@@ -67,6 +69,9 @@ def valid_shares(shares):
 
 DEFAULT_RESERVE = 20 * 10**9
 
+ALLOWED_HOSTS_ENV = "COUCHY_AGENT_ALLOWED_HOSTS"
+INDEX_DIR_ENV = "COUCHY_AGENT_INDEX_DIR"
+
 _HOST_NAME = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
 
 
@@ -111,9 +116,16 @@ def _clean(data):
     }
 
 
+def env_hosts(env=None):
+    """The valid hosts in COUCHY_AGENT_ALLOWED_HOSTS."""
+    raw = (env if env is not None else os.environ).get(ALLOWED_HOSTS_ENV, "")
+    return valid_hosts([h for h in raw.split(",") if h.strip()])
+
+
 class Config:
-    def __init__(self, store):
+    def __init__(self, store, env=None):
         self.store = store
+        self.env = env if env is not None else os.environ
         self._cache = None  # (signature, data)
 
     def _file(self):
@@ -141,7 +153,9 @@ class Config:
         return dict(self.load()["shares"])
 
     def allowed_hosts(self):
-        return list(self.load()["allowedHosts"])
+        """The config's allowed hosts plus the environment's."""
+        out = list(self.load()["allowedHosts"])
+        return out + [h for h in env_hosts(self.env) if h not in out]
 
     def allow_pickle(self):
         return self.load()["allowPickle"]
@@ -150,6 +164,10 @@ class Config:
         return self.load()["reserveBytes"]
 
     def index_dir(self):
+        """COUCHY_AGENT_INDEX_DIR when it's absolute, else the config's."""
+        env = self.env.get(INDEX_DIR_ENV, "").strip()
+        if env and os.path.isabs(env):
+            return os.path.normpath(env)
         return self.load()["indexDir"]
 
     def set(self, **changes):

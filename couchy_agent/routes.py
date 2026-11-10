@@ -85,6 +85,7 @@ class Agent:
     # Set by comfy.py: "on" once the scope hook is installed, the nodes'
     # version once they're registered, and what to call once paired.
     scope_hook = "off"
+    lockdown = "off"
     node_version = None
     on_paired = None
 
@@ -167,7 +168,7 @@ class Agent:
         dirs = self.folders.all()
         out = await asyncio.to_thread(files.usage, dirs, g["namespace"])
         out = {"namespace": g["namespace"], "folders": out, "permissions": perms.permissions(dirs),
-               "scope_hook": self.scope_hook, "nodes": self.node_version}
+               "scope_hook": self.scope_hook, "nodes": self.node_version, "lockdown": self.lockdown}
         return web.json_response(out)
 
     async def list_files(self, request):

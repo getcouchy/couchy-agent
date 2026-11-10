@@ -1,0 +1,74 @@
+{
+  "comfyui": {
+    "repo": "https://github.com/comfyanonymous/ComfyUI",
+    "version": "v0.42.5",
+    "commit": "483dae4326356b81de05d27aca3f433dd323cc25"
+  },
+  "python": "3.12",
+  "packs": [
+    {
+      "id": "comfyui-manager",
+      "name": "ComfyUI-Manager",
+      "dir": "ComfyUI-Manager",
+      "repo": "https://github.com/Comfy-Org/ComfyUI-Manager",
+      "commit": "7e1af9c202fbd0051df3da43572976acd12857dc",
+      "required": true,
+      "probe": "/manager/version",
+      "why": "installs node packs from Couchy"
+    },
+    {
+      "id": "was-node-suite-comfyui",
+      "name": "WAS Node Suite",
+      "dir": "was-node-suite-comfyui",
+      "repo": "https://github.com/WASasquatch/was-node-suite-comfyui",
+      "commit": "f7c6c22957d8dda3ccb8202ee98a85c2e6e5bc6a",
+      "required": true,
+      "registry": "was-node-suite-comfyui",
+      "classes": [
+        "SAM Model Loader",
+        "SAM Parameters",
+        "SAM Image Mask"
+      ],
+      "why": "tap to select in the mask editor"
+    },
+    {
+      "id": "comfyui-gguf",
+      "name": "ComfyUI-GGUF",
+      "dir": "ComfyUI-GGUF",
+      "repo": "https://github.com/city96/ComfyUI-GGUF",
+      "commit": "6ea2651e7df66d7585f6ffee804b20e92fb38b8a",
+      "required": true,
+      "registry": "comfyui-gguf",
+      "classes": [
+        "UnetLoaderGGUF",
+        "CLIPLoaderGGUF",
+        "DualCLIPLoaderGGUF"
+      ],
+      "why": "GGUF checkpoints in graphs and blueprints"
+    },
+    {
+      "id": "comfyui-videohelpersuite",
+      "name": "ComfyUI-VideoHelperSuite",
+      "dir": "ComfyUI-VideoHelperSuite",
+      "repo": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",
+      "commit": "4d907bee61e92c2e65af3bd6383a4e4d356126d1",
+      "required": true,
+      "registry": "comfyui-videohelpersuite",
+      "classes": [
+        "VHS_VideoCombine"
+      ],
+      "why": "video outputs"
+    },
+    {
+      "id": "comfyform-helper",
+      "name": "comfyform helper",
+      "dir": "comfyform-helper",
+      "repo": "https://github.com/getcouchy/couchyforms-helper",
+      "commit": "d9a6200995e35df62204d77c90196d7add542d2c",
+      "required": false,
+      "probe": "/comfyform/packs",
+      "why": "pins the pack versions blueprints depend on, and lists and deletes Couchy's files on the server",
+      "private": true
+    }
+  ]
+}

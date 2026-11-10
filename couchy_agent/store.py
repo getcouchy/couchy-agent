@@ -3,6 +3,10 @@ couchy-agent/ (0700, files 0600). Plain Python, no ComfyUI imports.
 
 - pairing-code: the one outstanding code, in plain text, for the operator.
 - pairing.json: that code's hash and expiry. Codes are single use.
+- pairing-token.json: the hash of the pod's self-pairing token
+  (COUCHY_AGENT_PAIRING_TOKEN), its expiry and whether it's spent. It pairs
+  once, within 30 minutes of the agent's first start with it, with
+  models: write.
 - keys.json: namespaces and the hashes of their keys, each bound to its
   namespace, a mode (rw or ro) and a models grant (none, read or write).
   A key itself is never stored. Keys from before the models grant read as
@@ -27,6 +31,8 @@ DIR_NAME = "couchy-agent"
 CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 CODE_LEN = 12
 CODE_TTL = 24 * 3600
+TOKEN_TTL = 30 * 60
+TOKEN_ENV = "COUCHY_AGENT_PAIRING_TOKEN"
 
 MODES = ("rw", "ro")
 
@@ -145,24 +151,54 @@ class Store:
                 return None
             return self._mint_code()
 
-    def redeem(self, code, label):
-        """Spend a code: make a namespace and its rw key. Answers
-        {namespace, key} or None for a wrong, used or expired code."""
-        given = normalize_code(code)
-        if len(given) != CODE_LEN:
-            return None
+    # The pod's pairing token ---------------------------------------------
+
+    def arm_token(self, token):
+        """On start with COUCHY_AGENT_PAIRING_TOKEN set: remember its hash,
+        valid 30 minutes from the first start that saw it. A restart with
+        the same token keeps that expiry, and a spent token stays spent."""
+        if not isinstance(token, str) or not token.strip():
+            return False
+        h = _hash(token.strip())
         with self._locked():
+            t = self._read_json("pairing-token.json", {})
+            if t.get("hash") != h:
+                self._write_json("pairing-token.json", {"hash": h, "expires": self.clock() + TOKEN_TTL, "used": False})
+        return True
+
+    def _spend_token(self, given):
+        """True once for the armed token, within its time. Holds the lock."""
+        t = self._read_json("pairing-token.json", {})
+        if not t.get("hash") or t.get("used") or t.get("expires", 0) <= self.clock():
+            return False
+        if not hmac.compare_digest(t["hash"], _hash(given)):
+            return False
+        t["used"] = True
+        self._write_json("pairing-token.json", t)
+        return True
+
+    def redeem(self, code, label):
+        """Spend a code, or the pod's pairing token: make a namespace and
+        its rw key. Answers {namespace, key, ...} or None for a wrong, used
+        or expired one, the same refusal either way."""
+        if not isinstance(code, str):
+            return None
+        given = normalize_code(code)
+        with self._locked():
+            models = None
             p = self._read_json("pairing.json", {})
-            if not p.get("hash") or p.get("expires", 0) <= self.clock():
+            if (len(given) == CODE_LEN and p.get("hash") and p.get("expires", 0) > self.clock()
+                    and hmac.compare_digest(p["hash"], _hash(given))):
+                models = p.get("models", DEFAULT_MODELS)
+                if models not in MODELS_GRANTS:
+                    models = DEFAULT_MODELS
+                self._write_json("pairing.json", {})
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(self._path("pairing-code"))
+            elif code.strip() and self._spend_token(code.strip()):
+                models = "write"  # Couchy created this host, so Couchy controls it
+            if models is None:
                 return None
-            if not hmac.compare_digest(p["hash"], _hash(given)):
-                return None
-            models = p.get("models", DEFAULT_MODELS)
-            if models not in MODELS_GRANTS:
-                models = DEFAULT_MODELS
-            self._write_json("pairing.json", {})
-            with contextlib.suppress(FileNotFoundError):
-                os.remove(self._path("pairing-code"))
             data = self._load_keys()
             ns = _new_id("ns_", 8)
             data["namespaces"][ns] = {"label": _label(label), "created": int(self.clock())}

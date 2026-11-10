@@ -127,6 +127,27 @@ symlinks included, and must stay inside its folder; symlinks are never listed; f
 never deleted. On top of that, inside `couchy/` only the key's namespace is reachable.
 Owners and run ids are letters, digits, `_` and `-`.
 
+## Lockdown and self-pairing (cloud GPUs)
+
+For a server Couchy created itself, such as a cloud GPU, two settings in the environment
+change the agent. The cloud image (`cloud/`, see [its README](cloud/README.md)) sets both.
+
+- **`COUCHY_AGENT_LOCKDOWN=1`.** Every route ComfyUI serves needs an agent key, not only
+  `/view`, `/upload` and `/prompt`. That includes the websocket, `/object_info`,
+  `/system_stats` and ComfyUI's own UI, which isn't supported on such a server. Two routes
+  stay open, each with its own credential: `POST /couchy/pair` (a code or the token below) and
+  `GET /couchy/models/blob/{sha256}` (a ticket). `GET /couchy/usage` reports
+  `"lockdown": "on"`.
+- **`COUCHY_AGENT_PAIRING_TOKEN`.** It's a one-time secret the API minted for this host.
+  `POST /couchy/pair {code: <token>, label}` accepts it in place of a printed code, once, within
+  30 minutes of the first agent start that saw it; a restart doesn't extend that or re-arm a
+  spent token. **The key it answers has `models: write`**, because Couchy is who controls a host
+  it created. A wrong, spent or expired token gets the same 403 as a wrong code. Only its hash
+  is kept, in `user/couchy-agent/pairing-token.json`, and it's never logged.
+- **`COUCHY_AGENT_ALLOWED_HOSTS`** (comma-separated) adds to the allowed hosts for pulls, so
+  presigned pulls from the workspace's buckets work on a fresh host. `COUCHY_AGENT_INDEX_DIR`
+  sets the index dir, ahead of `config --index-dir`.
+
 ## Models
 
 The models routes say what's on this host's disks, what a `.safetensors` file's header
