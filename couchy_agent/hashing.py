@@ -1,8 +1,12 @@
 """The models index and the background hasher.
 
 The index maps {location, folder, path, size, mtime} to {sha256,
-verifiedAt}. It lives in user/couchy-agent/models-index.json (0600), so a
-restart rehashes only files whose size or mtime changed.
+verifiedAt}. It lives in user/couchy-agent/models-index.json (0600), or in
+the index dir the host chose (config --index-dir, store --index-dir), so a
+models folder that outlives the host keeps its index beside it (a RunPod
+network volume, mounted as ComfyUI's models folder on each new pod). A
+restart rehashes only files whose size or mtime changed, and an index that
+is missing or can't be read is rebuilt in the background.
 
 Hashing never runs on a request. One daemon thread scans the locations (the
 host every minute, shares every five, since a NAS scan is slower and
@@ -14,6 +18,7 @@ eviction rules need a cold copy verified within 30 days.
 """
 
 import hashlib
+import json
 import logging
 import os
 import sys
@@ -35,14 +40,29 @@ log = logging.getLogger("couchy_agent.models")
 
 
 class Index:
-    def __init__(self, store):
+    def __init__(self, store, dir=None):
         self.store = store
+        self.dir = dir or store.dir
         self._lock = threading.Lock()
         self._files = {}  # (location, folder, path) -> {size, mtime, sha256, verifiedAt, mismatchAt?}
         self.load()
 
+    @property
+    def file(self):
+        return os.path.join(self.dir, INDEX_FILE)
+
+    def _read(self):
+        try:
+            with open(self.file) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as e:
+            log.warning("models index unreadable; rebuilding it", extra={"error": e.__class__.__name__})
+            return {}
+
     def load(self):
-        data = self.store._read_json(INDEX_FILE, {})
+        data = self._read()
         files = {}
         for e in data.get("files", []) if isinstance(data, dict) else []:
             try:
@@ -57,8 +77,9 @@ class Index:
     def save(self):
         with self._lock:
             rows = [{"location": k[0], "folder": k[1], "path": k[2], **v} for k, v in sorted(self._files.items())]
+        text = json.dumps({"version": 1, "files": rows}, indent=2) + "\n"
         with self.store._locked():
-            self.store._write_json(INDEX_FILE, {"version": 1, "files": rows})
+            _write_atomic(self.dir, INDEX_FILE, text)
 
     def get(self, location, folder, path):
         with self._lock:
@@ -96,6 +117,27 @@ class Index:
         """{(location, folder, path): sha256} for every hashed file."""
         with self._lock:
             return {k: v["sha256"] for k, v in self._files.items() if v.get("sha256")}
+
+
+def _write_atomic(dir, name, text):
+    """name in dir, 0600, written to a temp file in the same dir and
+    renamed over it, so a crash or a second reader never sees half."""
+    os.makedirs(dir, mode=0o700, exist_ok=True)
+    tmp = os.path.join(dir, f".{name}.{os.getpid()}.{threading.get_native_id()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        data = text.encode()
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        os.remove(tmp)
+        raise
+    os.close(fd)
+    os.replace(tmp, os.path.join(dir, name))
 
 
 class Hasher:

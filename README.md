@@ -172,7 +172,7 @@ rest), and all are also served under `/api/`. Every route that names a file take
 | `GET /couchy/models/space` | Each volume that holds a models folder: `{volumes: [{location, folders, freeBytes, totalBytes}]}` |
 | `GET /couchy/models/history?[since]` | Which hashed models ran together in ComfyUI's history: `{runs: [{at, sha256: [...]}]}`, oldest first, `at` in seconds, after `since` when given. No prompts, prompt ids, images or other inputs. Empty in store mode |
 | `GET /couchy/models/pulls/{id}` | `{id, state: queued \| running \| verifying \| done \| failed, bytesDone, bytesTotal, error?}`. 404 for a pull this agent doesn't have, as after a restart |
-| `POST /couchy/models/pull {sha256, location, folder, path, size, source}` | `write`. Starts a pull and answers `{id}` at once (the same id for a pull of the same file to the same place that's still running). `source` is `{url, headers?}` or `{peer, ticket}`, `peer` being another agent's base URL |
+| `POST /couchy/models/pull {sha256, location, folder, path, size, source}` | `write`. Starts a pull and answers `{id}` at once (the same id for a pull of the same file to the same place that's still running). `source` is `{url, headers?}`, `{peer, ticket}` (`peer` being another agent's base URL) or `{presigned}` (a bucket object's presigned URL, minted by the API for this pull) |
 | `POST /couchy/models/pulls/{id}/cancel` | `write`. Stops it and removes the partial file; answers its state |
 | `POST /couchy/models/delete {sha256, location, folder, path}` | `write`. Deletes the file only when its indexed hash is `sha256`. Answers `{state: deleted \| missing \| mismatch \| refused}`, with a `reason` for refused (`not_hashed` yet, a `symlink` or a bad `path`) |
 | `POST /couchy/models/tickets {sha256, location, ttl?}` | `write`. A one-time ticket for the file with that hash there, for another agent's pull: `{ticket, expiresAt}`. `ttl` is seconds, 300 by default and at most 3600. 404 when no hashed file there has that hash |
@@ -192,7 +192,15 @@ Hashing a 23 GB checkpoint takes minutes, so it never runs on a request. A backg
 hashes new and changed files one at a time, at low priority (a niced thread on Linux), across
 `host` and every share, and keeps `{location, folder, path, size, mtime} → {sha256,
 verifiedAt}` in `user/couchy-agent/models-index.json` (`0600`). After a restart only files
-whose size or mtime changed are hashed again.
+whose size or mtime changed are hashed again, and an index that's missing or can't be read is
+rebuilt in the background.
+
+**`--index-dir`** keeps the index in another folder, written atomically and `0600`. Use it when
+the models folder outlives the host, such as a RunPod network volume mounted as ComfyUI's models
+folder: with the index on the volume (`config --index-dir /workspace/models/.couchy-index`, read
+when ComfyUI starts), a new pod rehashes only what changed instead of 400 GB. A folder inside the
+models root is fine; it isn't a models folder, so it's never listed. Store mode takes
+`store --index-dir` too.
 
 Each file is **re-verified weekly** by hashing it again. A match sets `verifiedAt`. A mismatch
 (the bytes changed under the same size and mtime) clears `sha256` and `verifiedAt`, logs
@@ -219,8 +227,11 @@ that turns up empty or missing (a mount that failed) keeps its hashes until it's
   Civitai's download bucket, over HTTPS; plus a peer agent with a ticket. Anything else, a
   redirect included, needs the host's allowed hosts (HTTP or HTTPS) and otherwise fails with
   `host_not_allowed`. A GPU host is never a fetch-anything proxy.
+- **A presigned URL** (a bucket object, valid minutes) is fetched only when its host is in the
+  allowed hosts (being Civitai or Hugging Face isn't enough), and it never follows a redirect. Add the bucket's
+  endpoint, such as `r2.cloudflarestorage.com`, to fetch from it.
 - **Credentials are for that pull only.** A Civitai token in the URL, a Hugging Face
-  `Authorization` header or a ticket is kept in memory while the pull runs. It's never written
+  `Authorization` header, a ticket or a presigned URL is kept in memory while the pull runs. It's never written
   to disk or logged, and headers aren't sent on to another host on a redirect.
 - **Two at a time:** at most two pulls run and the rest queue.
 - **Room:** a pull that would leave less than the reserve free on its volume (20 GB by default)
@@ -233,6 +244,7 @@ sudo -u comfy python -m couchy_agent config --allowed-host models.example.com   
 sudo -u comfy python -m couchy_agent config --clear-allowed-hosts
 sudo -u comfy python -m couchy_agent config --allow-pickle                      # or --no-allow-pickle
 sudo -u comfy python -m couchy_agent config --reserve-gb 50
+sudo -u comfy python -m couchy_agent config --index-dir /workspace/models/.couchy-index   # or --clear-index-dir
 ```
 
 An allowed host covers its subdomains. These sit in `config.json` beside the shares, and a

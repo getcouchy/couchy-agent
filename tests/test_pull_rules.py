@@ -23,6 +23,13 @@ class Hosts(unittest.TestCase):
                     "https://192.168.1.10/x", "not a url"):
             self.assertFalse(pulls.host_allowed(url), url)
 
+    def test_presigned_urls_need_allowed_hosts(self):
+        allowed = ["r2.cloudflarestorage.com"]
+        self.assertTrue(pulls.in_allowed_hosts("https://bucket.acct.r2.cloudflarestorage.com/k?X-Amz-Signature=s", allowed))
+        self.assertFalse(pulls.in_allowed_hosts("https://huggingface.co/x", allowed))
+        self.assertFalse(pulls.in_allowed_hosts("https://huggingface.co/x", []))
+        self.assertFalse(pulls.in_allowed_hosts("https://u:p@bucket.r2.cloudflarestorage.com/k", allowed))
+
     def test_allowed_hosts_and_their_subdomains(self):
         allowed = ["models.example.com", "10.0.0.5"]
         self.assertTrue(pulls.host_allowed("http://models.example.com:8080/x", allowed))

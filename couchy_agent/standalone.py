@@ -39,9 +39,9 @@ def parse_listen(text):
     return host, int(port)
 
 
-def build(user_dir, root, shares=None):
-    """The store-mode app. shares, when given, replaces the config's for
-    this run."""
+def build(user_dir, root, shares=None, index_dir=None):
+    """The store-mode app. shares and index_dir, when given, replace the
+    config's for this run."""
     store = Store(user_dir)
     store.ensure_dir()
     store.migrate()
@@ -50,7 +50,7 @@ def build(user_dir, root, shares=None):
     share_source = (lambda: dict(shares)) if shares is not None else config.shares
     root = os.path.abspath(root)
     locations = models.Locations(lambda _shares: models.share_folders(root), share_source, root)
-    index = Index(store)
+    index = Index(store, index_dir or config.index_dir())
     hasher = Hasher(locations, index)
     pulls = Pulls(locations, hasher, config)
     agent = Agent(store, Folders({}), models=ModelsRoutes(locations, index, hasher, pulls=pulls, tickets=Tickets()))
@@ -76,10 +76,10 @@ def build(user_dir, root, shares=None):
     return app, agent
 
 
-def run(user_dir, root, listen=DEFAULT_LISTEN, shares=None):
+def run(user_dir, root, listen=DEFAULT_LISTEN, shares=None, index_dir=None):
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     host, port = parse_listen(listen)
-    app, _ = build(user_dir, root, shares)
+    app, _ = build(user_dir, root, shares, index_dir)
     if host not in ("127.0.0.1", "::1", "localhost"):
         log.warning("couchy-agent: store mode listens on %s; put it behind TLS, since keys and tickets travel on "
                     "every call", host)

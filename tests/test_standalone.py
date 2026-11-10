@@ -69,6 +69,15 @@ class StoreMode(AioHTTPTestCase):
             r = await self.client.get(route, headers=auth(key))
             self.assertEqual(r.status, 404, route)
 
+    def test_index_dir(self):
+        vol = self.t.path("nas/.couchy-index")
+        app, agent = standalone.build(self.state, self.root, index_dir=vol)
+        self.addCleanup(agent.hasher.stop)
+        agent.hasher.scan(force=True)
+        while agent.hasher.step():
+            pass
+        self.assertTrue(os.path.exists(os.path.join(vol, "models-index.json")))
+
     def test_parse_listen(self):
         self.assertEqual(standalone.parse_listen("0.0.0.0:8190"), ("0.0.0.0", 8190))
         self.assertEqual(standalone.parse_listen("[::1]:8190"), ("::1", 8190))

@@ -79,6 +79,18 @@ class MainTest(unittest.TestCase):
         c = Config(self.store).load()
         self.assertEqual((c["allowedHosts"], c["allowPickle"]), ([], False))
 
+    def test_config_index_dir(self):
+        vol = os.path.join(self.t.base, "volume", "models", ".couchy-index")
+        code, out, err = self.run_main("config", "--index-dir", vol)
+        self.assertEqual(code, 0)
+        self.assertIn("restart ComfyUI", err)
+        self.assertIn(f"index-dir: {vol}", out)
+        self.assertEqual(Config(self.store).index_dir(), vol)
+        self.assertTrue(os.path.isdir(vol))
+        self.assertEqual(self.run_main("config", "--index-dir", "relative/dir")[0], 2)
+        self.run_main("config", "--clear-index-dir")
+        self.assertIsNone(Config(self.store).index_dir())
+
     def test_a_hand_edited_config_cannot_add_host_or_a_relative_path(self):
         self.store.ensure_dir()
         with open(os.path.join(self.store.dir, "config.json"), "w") as f:

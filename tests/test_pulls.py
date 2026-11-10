@@ -357,6 +357,44 @@ class PullsTest(AioHTTPTestCase):
         r = await self.client.get(f"/couchy/models/pulls/{out['id']}", headers=auth(key))
         self.assertNotIn(TOKEN, await r.text())
 
+    async def test_a_presigned_pull_from_an_allowed_host(self):
+        key = await self.key()
+        data = bytes(range(150))
+        url = self.offer("bucket", data) + "?X-Amz-Signature=sig_5e5e5e&X-Amz-Expires=900"
+        body = self.body(data, path="bucket.safetensors", presigned=url)
+        pid = pull_id(body["sha256"], "host", "checkpoints", "bucket.safetensors")
+        self.t.write(f"models/.couchy-partial/{pid}", data[:50])  # resumes where the URL is still valid
+        out = await self.pull(key, body)
+        self.assertEqual(out["state"], "done", out)
+        self.assertEqual(self.read("models/checkpoints/bucket.safetensors"), data)
+        self.assertEqual(self.src.seen[-1][1].get("Range"), "bytes=50-")
+        logs, disk = self.logs.getvalue(), self.all_files_text()
+        for leak in ("sig_5e5e5e", "X-Amz", "/src/"):
+            self.assertNotIn(leak, logs)
+            self.assertNotIn(leak.encode(), disk)
+
+    async def test_a_presigned_host_must_be_in_allowed_hosts(self):
+        key = await self.key()
+        data = b"abc"
+        self.config.set(allowedHosts=["127.0.0.1"])
+        url = self.offer("a", data).replace("127.0.0.1", "localhost")
+        out = await self.pull(key, self.body(data, presigned=url))
+        self.assertEqual((out["state"], out["error"]), ("failed", "host_not_allowed"))
+        # A known host isn't enough for a presigned URL.
+        out = await self.pull(key, self.body(data, path="b.safetensors", presigned="https://huggingface.co/x"))
+        self.assertEqual((out["state"], out["error"]), ("failed", "host_not_allowed"))
+        self.assertEqual(self.src.seen, [])
+        # It never follows a redirect, even to an allowed host.
+        self.offer("r", data, "redirect")
+        self.src.redirects["r"] = self.url("a")
+        out = await self.pull(key, self.body(data, path="c.safetensors", presigned=self.url("r")))
+        self.assertEqual((out["state"], out["error"]), ("failed", "source_failed"))
+        # Safe formats only, as for every source.
+        out = await self.pull(key, self.body(data, path="d.ckpt", presigned=self.url("a")))
+        self.assertEqual(out["error"], "pickle_refused")
+        r = await self.client.post("/couchy/models/pull", json=self.body(data, presigned=""), headers=auth(key))
+        self.assertEqual(r.status, 400)
+
     async def test_no_room(self):
         key = await self.key()
         self.config.set(reserveBytes=10**18)

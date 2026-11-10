@@ -74,7 +74,7 @@ def setup():
     obs.models_logger()
     config = Config(store)
     locations = models.Locations(_host_models, config.shares, lambda: folder_paths.models_dir)
-    index = Index(store)
+    index = Index(store, config.index_dir())
     hasher = Hasher(locations, index)
     routes = ModelsRoutes(locations, index, hasher, pulls=Pulls(locations, hasher, config), tickets=Tickets(),
                           history=_history)
