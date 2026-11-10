@@ -98,14 +98,16 @@ class Agent:
 
     # Routes ----------------------------------------------------------------
 
-    def add_routes(self, router):
+    def add_routes(self, router, files=True):
+        """files=False (store mode) leaves out the namespaced file routes."""
         for prefix in ("", "/api"):
             router.add_post(prefix + "/couchy/pair", self.pair)
-            router.add_get(prefix + "/couchy/usage", self.usage)
-            router.add_get(prefix + "/couchy/files", self.list_files)
-            router.add_post(prefix + "/couchy/files/delete", self.delete)
-            router.add_post(prefix + "/couchy/files/adopt", self.adopt)
-            router.add_post(prefix + "/couchy/files/move-owner", self.move_owner)
+            if files:
+                router.add_get(prefix + "/couchy/usage", self.usage)
+                router.add_get(prefix + "/couchy/files", self.list_files)
+                router.add_post(prefix + "/couchy/files/delete", self.delete)
+                router.add_post(prefix + "/couchy/files/adopt", self.adopt)
+                router.add_post(prefix + "/couchy/files/move-owner", self.move_owner)
             router.add_get(prefix + "/couchy/keys", self.list_keys)
             router.add_post(prefix + "/couchy/keys", self.mint_key)
             router.add_post(prefix + "/couchy/keys/revoke", self.revoke_key)

@@ -129,9 +129,10 @@ Owners and run ids are letters, digits, `_` and `-`.
 
 ## Models
 
-The models routes are read-only for now: what's on this host's disks, what a `.safetensors`
-file's header says, and how much room each volume has. The agent is mechanism only here too:
-it never decides what to keep, load or evict.
+The models routes say what's on this host's disks, what a `.safetensors` file's header
+says, how much room each volume has and which models ran together, and they pull, delete and
+hand copies to other agents when Couchy asks. The agent is mechanism only here too: it never
+decides what to keep, load or evict, and it refuses what its host doesn't allow.
 
 ### Locations and shares
 
@@ -160,13 +161,27 @@ symlink (`models/checkpoints` pointing at a bigger disk) is fine.
 
 ### Routes
 
-All need a key whose models grant is `read` or `write`, and are also served under `/api/`.
+All but the blob need a key whose models grant is `read` (the first four) or `write` (the
+rest), and all are also served under `/api/`. Every route that names a file takes `location`:
+`host` (the default) or a share's name.
 
 | Route | Does |
 | --- | --- |
 | `GET /couchy/models?[folder][&location][&after][&limit]` | A page (at most 1000) of model files, every folder and location unless narrowed: `{files: [{location, folder, path, size, mtime, sha256, verifiedAt}], next?}`. `sha256` and `verifiedAt` are null until the file is hashed. Pass `next` as `after` |
 | `GET /couchy/models/header?folder&path[&location]` | A `.safetensors` file's header, read from its first bytes: `{metadata, tensors: [{name, dtype, shape}], tensorCount, truncated}`. `location` defaults to `host`. At most 2000 tensors are listed. 422 for any other format and for a header over 1 MB; 404 for a missing file or a symlink |
 | `GET /couchy/models/space` | Each volume that holds a models folder: `{volumes: [{location, folders, freeBytes, totalBytes}]}` |
+| `GET /couchy/models/history?[since]` | Which hashed models ran together in ComfyUI's history: `{runs: [{at, sha256: [...]}]}`, oldest first, `at` in seconds, after `since` when given. No prompts, prompt ids, images or other inputs. Empty in store mode |
+| `GET /couchy/models/pulls/{id}` | `{id, state: queued \| running \| verifying \| done \| failed, bytesDone, bytesTotal, error?}`. 404 for a pull this agent doesn't have, as after a restart |
+| `POST /couchy/models/pull {sha256, location, folder, path, size, source}` | `write`. Starts a pull and answers `{id}` at once (the same id for a pull of the same file to the same place that's still running). `source` is `{url, headers?}` or `{peer, ticket}`, `peer` being another agent's base URL |
+| `POST /couchy/models/pulls/{id}/cancel` | `write`. Stops it and removes the partial file; answers its state |
+| `POST /couchy/models/delete {sha256, location, folder, path}` | `write`. Deletes the file only when its indexed hash is `sha256`. Answers `{state: deleted \| missing \| mismatch \| refused}`, with a `reason` for refused (`not_hashed` yet, a `symlink` or a bad `path`) |
+| `POST /couchy/models/tickets {sha256, location, ttl?}` | `write`. A one-time ticket for the file with that hash there, for another agent's pull: `{ticket, expiresAt}`. `ttl` is seconds, 300 by default and at most 3600. 404 when no hashed file there has that hash |
+| `GET /couchy/models/blob/{sha256}` | No key: a ticket, in `X-Couchy-Agent-Ticket` or `?ticket`. Streams the file, with `Range`. A ticket is spent the first time it's shown, and is for one file and location; 403 otherwise |
+
+`error` on a failed pull is one of `exists` (a different file is at the target), `hash_mismatch`,
+`size_mismatch`, `pickle_refused`, `format_refused`, `host_not_allowed`, `no_room`,
+`ticket_refused`, `not_found`, `source_refused`, `source_failed`, `too_many_redirects`,
+`network`, `io`, `location_missing`, `bad_source` or `cancelled`.
 
 A listing is the inventory as of the last scan: the host is scanned every minute and shares
 every five, so a NAS isn't walked on every page.
@@ -184,12 +199,71 @@ Each file is **re-verified weekly** by hashing it again. A match sets `verifiedA
 `model verify mismatch` as a warning, and leaves the file unhashed until it changes. A share
 that turns up empty or missing (a mount that failed) keeps its hashes until it's back.
 
+### Pulls
+
+- **Into a partial file, then renamed.** A pull streams into `.couchy-partial/<id>` under its
+  location's root (under the target folder instead when that's on another volume), hashing as
+  it goes. It checks the size and SHA-256, then renames the file into place without replacing
+  anything (`renameat2` with `RENAME_NOREPLACE`, else a hard link then unlink). A different file
+  at the target fails the pull with `exists`; the same file, already hashed, makes it `done` at
+  once. `.couchy-partial` is never listed, hashed or served.
+- **Resumes.** A pull's id comes from its hash and target, so when the API starts it again after
+  a failure or a restart (the pull answers 404 then: pulls are kept in memory) it picks up the
+  partial file with `Range`. A source that ignores `Range` starts over. A network error keeps the
+  partial file; a mismatch or a cancel removes it.
+- **A share is a target** like `host`, so a GPU host that mounts nas-cold can copy to it.
+- **Safe formats only:** `.safetensors`, `.gguf` and `.sft`. Pickle formats (`.ckpt`, `.pt`,
+  `.pth`, `.bin`) run code when ComfyUI loads them, and fail with `pickle_refused` unless the host
+  allows them. Anything else fails with `format_refused`.
+- **Known hosts only:** `civitai.com`, `huggingface.co`, `hf.co` and their subdomains, and
+  Civitai's download bucket, over HTTPS; plus a peer agent with a ticket. Anything else, a
+  redirect included, needs the host's allowed hosts (HTTP or HTTPS) and otherwise fails with
+  `host_not_allowed`. A GPU host is never a fetch-anything proxy.
+- **Credentials are for that pull only.** A Civitai token in the URL, a Hugging Face
+  `Authorization` header or a ticket is kept in memory while the pull runs. It's never written
+  to disk or logged, and headers aren't sent on to another host on a redirect.
+- **Two at a time:** at most two pulls run and the rest queue.
+- **Room:** a pull that would leave less than the reserve free on its volume (20 GB by default)
+  fails with `no_room`. The agent never evicts.
+
+The host's own rules, set as the account ComfyUI runs as:
+
+```sh
+sudo -u comfy python -m couchy_agent config --allowed-host models.example.com   # repeat; replaces the list
+sudo -u comfy python -m couchy_agent config --clear-allowed-hosts
+sudo -u comfy python -m couchy_agent config --allow-pickle                      # or --no-allow-pickle
+sudo -u comfy python -m couchy_agent config --reserve-gb 50
+```
+
+An allowed host covers its subdomains. These sit in `config.json` beside the shares, and a
+running agent reads them on its next pull.
+
+### Store mode
+
+For a host that keeps model copies but runs no ComfyUI:
+
+```sh
+pip install aiohttp            # Python 3.10+ and aiohttp are all it needs
+python -m couchy_agent store --root /volume1/models --listen 0.0.0.0:8190 [--share nas-cold=/volume2/models]
+```
+
+It serves the same models routes, pairing and keys, and hashes in the background, with
+`--root` (laid out like ComfyUI's `models/`) as `host`. There's no `/view`, guard, namespaced
+files or history. Its state lives in `~/.local/state/couchy-agent` (or `--user-directory`), and
+`pair`, `keys` and `config` use the same folder when no ComfyUI is around. `--listen` defaults to
+`127.0.0.1:8190`; anywhere beyond localhost, **put it behind TLS** (a reverse proxy), since its
+key and tickets travel on every call.
+
+**Which to use:** when the store is a share that GPU hosts already mount (the lab's NAS, as
+CIFS on spark-1 and comfy-2), use `--share` on those hosts and run nothing on the NAS. Store mode
+is for a machine that holds copies no GPU host mounts.
+
 ### Logging
 
 The models lines are JSON, one object per line on ComfyUI's console, each with
 `service: "couchy-agent"`, `version` and `server` (the host name). They name a file by its
 location, folder and the first 12 hex characters of its SHA-256 (`sha`), with `bytes` and
-`ms`, and never by its path. The same keys the Couchy API drops (`path`, `filename`, `token`,
+`ms`, and a pull by its id. Never a path, a URL, a header or a ticket. The same keys the Couchy API drops (`path`, `filename`, `token`,
 ...) are dropped from them at any depth.
 
 ## The guard on ComfyUI's own routes

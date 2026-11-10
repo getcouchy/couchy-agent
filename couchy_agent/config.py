@@ -5,6 +5,12 @@ no route reads or writes it.
 - shares: {name: path}, model roots mounted on the host (a NAS over CIFS or
   NFS) that use ComfyUI's models layout (checkpoints/, loras/, ...). Each is
   its own location next to ComfyUI's own models root, which is "host".
+- allowedHosts: [host], hosts a pull may fetch from beyond the known ones
+  (pulls.KNOWN_HOSTS). "example.com" also allows its subdomains.
+- allowPickle: true lets a pull fetch pickle formats (.ckpt, .pt, .pth,
+  .bin), which run code when ComfyUI loads them. Off by default.
+- reserveBytes: the free space a pull must leave on its volume (default
+  20 GB).
 
 The running agent re-reads the file when it changes, so a new share shows up
 on the next scan without a restart.
@@ -56,6 +62,48 @@ def valid_shares(shares):
     return out
 
 
+DEFAULT_RESERVE = 20 * 10**9
+
+_HOST_NAME = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
+
+
+def parse_host(text):
+    """A host name for allowed-hosts, lowercased; ValueError otherwise. No
+    scheme, port, path or wildcard: "example.com" covers its subdomains."""
+    host = (text or "").strip().lower().rstrip(".")
+    if not _HOST_NAME.match(host):
+        raise ValueError(f"an allowed host is a host name such as models.example.com, not {text!r}")
+    return host
+
+
+def valid_hosts(hosts):
+    out = []
+    if not isinstance(hosts, list):
+        return out
+    for h in hosts:
+        if not isinstance(h, str):
+            continue
+        try:
+            h = parse_host(h)
+        except ValueError:
+            continue
+        if h not in out:
+            out.append(h)
+    return out
+
+
+def _clean(data):
+    reserve = data.get("reserveBytes")
+    if not isinstance(reserve, int) or isinstance(reserve, bool) or reserve < 0:
+        reserve = DEFAULT_RESERVE
+    return {
+        "shares": valid_shares(data.get("shares")),
+        "allowedHosts": valid_hosts(data.get("allowedHosts")),
+        "allowPickle": data.get("allowPickle") is True,
+        "reserveBytes": reserve,
+    }
+
+
 class Config:
     def __init__(self, store):
         self.store = store
@@ -69,7 +117,7 @@ class Config:
         try:
             st = os.stat(self._file())
         except FileNotFoundError:
-            return {"shares": {}}
+            return _clean({})
         sig = (st.st_mtime_ns, st.st_size, st.st_ino)
         if self._cache is None or self._cache[0] != sig:
             try:
@@ -79,16 +127,33 @@ class Config:
                 data = {}
             if not isinstance(data, dict):
                 data = {}
-            self._cache = (sig, {"shares": valid_shares(data.get("shares"))})
+            self._cache = (sig, _clean(data))
         return self._cache[1]
 
     def shares(self):
         return dict(self.load()["shares"])
 
-    def set_shares(self, shares):
+    def allowed_hosts(self):
+        return list(self.load()["allowedHosts"])
+
+    def allow_pickle(self):
+        return self.load()["allowPickle"]
+
+    def reserve_bytes(self):
+        return self.load()["reserveBytes"]
+
+    def set(self, **changes):
+        """Change some keys (shares, allowedHosts, allowPickle,
+        reserveBytes) and keep the rest."""
         with self.store._locked():
+            self._cache = None
             data = dict(self.load())
-            data["shares"] = valid_shares(shares)
+            data.update(changes)
+            data = _clean(data)
             self.store._write_json(FILE, data)
             self._cache = None
+        return self.load()
+
+    def set_shares(self, shares):
+        self.set(shares=shares)
         return self.shares()

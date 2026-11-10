@@ -85,6 +85,18 @@ class Index:
             for k in keys:
                 self._files.pop(k, None)
 
+    def with_sha(self, sha256, location=None):
+        """[(location, folder, path, entry)] for every file indexed with
+        this hash, in the location if given."""
+        with self._lock:
+            return [(k[0], k[1], k[2], dict(v)) for k, v in sorted(self._files.items())
+                    if v.get("sha256") == sha256 and (location is None or k[0] == location)]
+
+    def shas(self):
+        """{(location, folder, path): sha256} for every hashed file."""
+        with self._lock:
+            return {k: v["sha256"] for k, v in self._files.items() if v.get("sha256")}
+
 
 class Hasher:
     def __init__(self, locations, index, clock=time.time, host_every=HOST_EVERY, share_every=SHARE_EVERY,
@@ -237,6 +249,23 @@ class Hasher:
                                                     "sha256": sha, "verifiedAt": now})
             log.info("model hashed", extra={"location": location, "folder": folder, "sha": sha12(sha),
                                             "bytes": before.st_size, "ms": ms})
+        self.index.save()
+
+    # Files the agent itself wrote or removed (pulls.py, a delete) --------
+
+    def landed(self, location, folder, path, st, sha256):
+        """A file the agent just wrote and verified: known by its hash at
+        once, without hashing it again."""
+        self.index.put(location, folder, path, {"size": st.st_size, "mtime": st.st_mtime, "sha256": sha256,
+                                                "verifiedAt": self.clock()})
+        with self._seen_lock:
+            if location in self._seen:
+                self._seen[location][(folder, path)] = (st.st_size, st.st_mtime)
+        self.index.save()
+
+    def removed(self, location, folder, path):
+        self.index.drop([(location, folder, path)])
+        self._forget(location, folder, path)
         self.index.save()
 
     def _forget(self, location, folder, path):

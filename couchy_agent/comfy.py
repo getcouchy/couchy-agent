@@ -25,8 +25,10 @@ from . import scope as scope_mod
 from .config import Config
 from .hashing import Hasher, Index
 from .models_routes import ModelsRoutes
+from .pulls import Pulls
 from .routes import Agent, Folders
 from .store import Store, format_code
+from .tickets import Tickets
 
 log = logging.getLogger("couchy_agent")
 
@@ -50,6 +52,13 @@ def _host_models(share_roots):
     return models.host_folders(folder_paths.folder_names_and_paths, share_roots)
 
 
+def _history():
+    """ComfyUI's history, read by models_routes for which models ran
+    together; nothing but the model names and times leaves history.py."""
+    queue = getattr(PromptServer.instance, "prompt_queue", None)
+    return queue.get_history() if queue is not None else {}
+
+
 def _display_name(class_type):
     try:
         import nodes
@@ -64,10 +73,12 @@ def setup():
     store.migrate()  # keys from before the models grant get models: read
     obs.models_logger()
     config = Config(store)
-    locations = models.Locations(_host_models, config.shares)
+    locations = models.Locations(_host_models, config.shares, lambda: folder_paths.models_dir)
     index = Index(store)
     hasher = Hasher(locations, index)
-    agent = Agent(store, Folders(_dirs, folder_paths.annotated_filepath), models=ModelsRoutes(locations, index, hasher))
+    routes = ModelsRoutes(locations, index, hasher, pulls=Pulls(locations, hasher, config), tickets=Tickets(),
+                          history=_history)
+    agent = Agent(store, Folders(_dirs, folder_paths.annotated_filepath), models=routes)
     agent.hasher = hasher
     hasher.start()
 
