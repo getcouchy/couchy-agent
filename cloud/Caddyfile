@@ -1,0 +1,26 @@
+# The token proxy: the pod's one exposed port answers only requests that
+# carry the server token Couchy generated for this pod, and forwards them to
+# ComfyUI on localhost. Nothing else answers, not even a 404 page of
+# ComfyUI's. start.sh checks the token's shape before Caddy reads it.
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+:{$PORT} {
+	@token header Authorization "Bearer {$COUCHY_SERVER_TOKEN}"
+	handle @token {
+		reverse_proxy 127.0.0.1:{$COMFY_PORT} {
+			# The agent reads its key from X-Couchy-Agent-Key; the proxy's
+			# token goes no further than here.
+			header_up -Authorization
+			flush_interval -1
+		}
+	}
+	handle {
+		respond 401 {
+			close
+		}
+	}
+}

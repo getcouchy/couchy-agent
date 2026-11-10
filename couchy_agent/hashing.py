@@ -322,8 +322,11 @@ class Hasher:
             self._thread.start()
         return self._thread
 
-    def stop(self):
+    def stop(self, wait=None):
+        """Stop the thread; with wait, join it for up to that many seconds."""
         self._stop.set()
+        if wait is not None and self._thread is not None:
+            self._thread.join(wait)
 
     def _run(self):
         _lower_priority()

@@ -20,14 +20,14 @@ import os
 import folder_paths
 from server import PromptServer
 
-from . import hook, models, obs, perms
+from . import hook, lockdown, models, obs, perms
 from . import scope as scope_mod
 from .config import Config
 from .hashing import Hasher, Index
 from .models_routes import ModelsRoutes
 from .pulls import Pulls
 from .routes import Agent, Folders
-from .store import Store, format_code
+from .store import TOKEN_ENV, TOKEN_MIN, Store, format_code
 from .tickets import Tickets
 
 log = logging.getLogger("couchy_agent")
@@ -83,6 +83,10 @@ def setup():
     hasher.start()
 
     app = PromptServer.instance.app
+    if lockdown.enabled():
+        app.middlewares.append(lockdown.middleware(agent))
+        agent.lockdown = "on"
+        log.warning("couchy-agent: lockdown is on: every ComfyUI route needs an agent key")
     app.middlewares.append(agent.middleware())
     agent.add_routes(app.router)
     guard_files(agent)
@@ -93,6 +97,10 @@ def setup():
             "Run ComfyUI as its own account with umask 077 and chmod -R go-rwx it; see couchy-agent's README.",
             name, path, mode)
 
+    if store.arm_token(os.environ.get(TOKEN_ENV, "")):
+        log.info("couchy-agent: a pairing token is set; it pairs once, with models: write")
+    elif os.environ.get(TOKEN_ENV, "").strip():
+        log.warning("couchy-agent: %s is shorter than %d characters; it won't pair", TOKEN_ENV, TOKEN_MIN)
     code = store.mint_code_if_none()
     if code:
         log.warning("couchy-agent: pairing code %s (valid 24 hours, also in %s/pairing-code)", format_code(code), store.dir)

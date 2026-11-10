@@ -27,11 +27,11 @@ class StoreMode(AioHTTPTestCase):
         os.makedirs(self.state)
         Config(Store(self.state)).set(reserveBytes=0)
         app, self.agent = standalone.build(self.state, self.root)
-        self.addCleanup(self.agent.hasher.stop)
         return app
 
     async def asyncTearDown(self):
         await super().asyncTearDown()
+        self.agent.hasher.stop(wait=10)  # before its folders go
         self.t.cleanup()
 
     async def test_pairs_and_serves_the_same_models_routes(self):
@@ -72,7 +72,6 @@ class StoreMode(AioHTTPTestCase):
     def test_index_dir(self):
         vol = self.t.path("nas/.couchy-index")
         app, agent = standalone.build(self.state, self.root, index_dir=vol)
-        self.addCleanup(agent.hasher.stop)
         agent.hasher.scan(force=True)
         while agent.hasher.step():
             pass

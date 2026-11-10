@@ -10,7 +10,7 @@ import argparse
 import os
 import sys
 
-from .config import Config, parse_host, parse_share
+from .config import Config, env_hosts, parse_host, parse_share
 from .store import CODE_TTL, MODELS_GRANTS, Store, format_code
 
 
@@ -156,6 +156,9 @@ def main(argv=None):
         for name, path in sorted(now["shares"].items()):
             print(f"share  {name}={path}")
         print("allowed-hosts: " + (", ".join(now["allowedHosts"]) or "none (Civitai and Hugging Face only)"))
+        extra = [h for h in env_hosts() if h not in now["allowedHosts"]]
+        if extra:
+            print("  plus from COUCHY_AGENT_ALLOWED_HOSTS: " + ", ".join(extra))
         print(f"allow-pickle: {'yes' if now['allowPickle'] else 'no'}")
         print(f"reserve: {now['reserveBytes'] / 10**9:g} GB")
         print(f"index-dir: {now['indexDir'] or 'none (user/couchy-agent)'}")
