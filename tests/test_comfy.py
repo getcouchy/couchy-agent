@@ -49,7 +49,9 @@ class LoadTest(unittest.TestCase):
         sys.modules["couchy_agent_pack"] = mod
         with self.assertLogs("couchy_agent", "WARNING") as logs:
             spec.loader.exec_module(mod)
-        self.assertEqual(mod.NODE_CLASS_MAPPINGS, {})
+        self.assertFalse(hasattr(mod, "NODE_CLASS_MAPPINGS"))  # V3: nodes come from comfy_entrypoint
+        self.assertTrue(callable(mod.comfy_entrypoint))
+        self.assertEqual(mod._agent.scope_hook, "off")  # this folder_paths has none of the three functions
         self.assertEqual(len(self.app.middlewares), 1)
         paths = {r.resource.canonical for r in self.app.router.routes()}
         self.assertTrue({"/couchy/pair", "/couchy/usage", "/api/couchy/files/adopt"} <= paths)
@@ -58,6 +60,7 @@ class LoadTest(unittest.TestCase):
         self.assertIn("pairing code", text)
         self.assertIn("models folder", text)  # 0755: open to other accounts
         self.assertNotIn("output folder", text)
+        self.assertIn("scope hook is off", text)
 
 
 if __name__ == "__main__":

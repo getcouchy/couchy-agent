@@ -1,7 +1,6 @@
 # couchy-agent
 
-A ComfyUI custom node pack for [Couchy](https://github.com/getcouchy/couchy). It registers no
-nodes. It keeps each Couchy tenant's files on the server in a folder of its own, and each
+A ComfyUI custom node pack for [Couchy](https://github.com/getcouchy/couchy). It keeps each Couchy tenant's files on the server in a folder of its own, and each
 person's files in a folder inside that:
 
 ```
@@ -87,7 +86,7 @@ All routes are also served under `/api/`, like ComfyUI's own. `folder` is `input
 | Route | Does |
 | --- | --- |
 | `POST /couchy/pair {code, label}` | No key. Spends a code; answers `{namespace, key, keyId, mode: "rw"}`. 403 for a wrong, used or expired code, 429 when locked out |
-| `GET /couchy/usage` | `{namespace, folders: {input, output: {count, bytes, owners: {<owner>: {count, bytes}}}}, permissions: "ok" \| "open"}`. Never file names |
+| `GET /couchy/usage` | `{namespace, folders: {input, output: {count, bytes, owners: {<owner>: {count, bytes}}}}, permissions: "ok" \| "open", scope_hook: "on" \| "off", nodes: <version> \| null}`. Never file names. `nodes` is the version of [Couchy's nodes](#couchys-file-nodes) once they're registered, so the API knows it can swap them in |
 | `GET /couchy/files?folder&owner[&after][&limit]` | A page (at most 1000) of one owner's files: `{files: [{subfolder, filename, size, mtime}], total: {count, bytes}, next?}`. Pass `next` as `after` |
 | `POST /couchy/files/delete {folder, files: [{subfolder, filename}]}` | Answers `{deleted, missing, refused}`, each a list |
 | `POST /couchy/files/delete {folder, owner}` | Deletes all of one owner's files; answers `{deleted, bytes}` |
@@ -122,9 +121,82 @@ can still be appended, and it runs before every handler (with and without the `/
 Paths are compared after resolving `..`, doubled slashes, backslashes and symlinks, and
 ignoring case, since macOS folders do.
 
+`/prompt` also binds the run's scope; see [Run scopes](#run-scopes).
+
 **Once a tenant has paired**, couchyforms-helper's `/comfyform/files` routes answer 410 when
 the helper runs in the same ComfyUI. They delete anything in `output`, `input` or `temp` for
 anyone who can reach ComfyUI. `/comfyform/packs` is untouched.
+
+## Run scopes
+
+The API sends each run's scope on `POST /prompt`, with its `rw` key:
+
+```json
+{"prompt": {...}, "extra_data": {"couchy": {"runId": "r_1", "owner": "u_1", "inputs": ["up_1", "up_2"]}}}
+```
+
+`inputs` are upload ids the API's `canRead` allowed for this run (the person's own and Lab's
+shared ones); `"metadata": false` also leaves the prompt and workflow out of saved PNGs. The
+guard checks the key is `rw` (403 otherwise, 400 for a malformed scope), binds the scope to the
+prompt id (setting `prompt_id` when the API sent none) and **removes `extra_data.couchy` before
+ComfyUI reads the body**, so it never reaches the history. A `prompt_id` that already has a
+scope is refused with 409, from anyone, so no second prompt can run under it.
+
+Scopes live in memory: they go when the queue finishes the prompt (success, error or
+interrupt), when it's deleted from the queue or the queue is wiped, and when ComfyUI refuses
+the prompt. A restart loses the queue anyway.
+
+The agent doesn't decide who may read what. It refuses only what the API didn't list.
+
+**Until the API sends scopes** (couchy #981), a prompt with an `rw` key and no
+`extra_data.couchy` gets a namespace scope: it reaches all of its key's namespace, which the key
+already can through `/view`, and nothing else inside `couchy/`. A prompt with no key, or an `ro`
+key, has no scope.
+
+## Couchy's file nodes
+
+On a paired server the agent registers five V3 nodes (`comfy_api.latest`) under the category
+`couchy`. A server paired after start-up gets them at pairing. They take an upload id, not a
+path, and the work is the stock node's on the resolved file, so outputs, EXIF and alpha handling,
+numbering and PNG metadata are ComfyUI's own.
+
+| Class | Display name | Replaces | Inputs | Does |
+| --- | --- | --- | --- | --- |
+| `CouchyLoadImage` | Couchy Load Image | `LoadImage` | `upload` | Opens `input/couchy/<ns>/<owner>/<upload>.*` when the upload is in the run's scope. IMAGE, MASK |
+| `CouchyLoadMask` | Couchy Load Mask | `LoadImageMask` | `upload`, `channel` | As above. MASK |
+| `CouchyLoadVideo` | Couchy Load Video | `LoadVideo` (core) | `upload` | As above. VIDEO |
+| `CouchySaveImage` | Couchy Save Image | `SaveImage` | `images` | Writes `output/couchy/<ns>/<owner>/<runId>/ComfyUI_00001_.png` ..., whatever prefix the graph had |
+| `CouchyPreviewImage` | Couchy Preview Image | `PreviewImage` | `images` | Writes to `temp/couchy/<ns>/<owner>/<runId>/` |
+
+Without a run scope (someone in ComfyUI's own UI) each fails with "This node only runs in runs
+Couchy starts."; an upload that isn't in the scope fails with "This file isn't part of this
+run.", naming the node. Saves are never answered from another run's cache. Video saves keep the
+API's prefix rewrite; there's no Couchy video save node.
+
+## The scope hook
+
+The agent wraps `folder_paths.get_annotated_filepath`, `exists_annotated_filepath` and
+`get_save_image_path`, the calls stock nodes and most packs use to resolve files, once at load:
+
+- **Inside `couchy/`**, a load is allowed only under `couchy/<ns>/<owner>/` for the run's owner,
+  or for an upload in its scope (`input/couchy/<ns>/<anyone>/<upload>.*`). A save must be in the
+  run's folder in `output/` or `temp/`, and is checked before ComfyUI makes the folder.
+  Anything else raises "This file isn't part of this run." and the run fails with that node
+  named.
+- **Outside `couchy/`**, paths are untouched, so model loaders and ComfyUI's own UI keep working.
+- **A prompt with no scope** gets nothing inside `couchy/` through these calls.
+
+Paths are resolved, symlinks included, before they're judged, so a `[output]` suffix, `..` or a
+path built at run time lands where it really points. Nodes made by expansion run under their
+prompt's id and are held the same way. A pack that opens files itself, or that imported these
+functions by name before the agent loaded, isn't held; that's the API's file-access check
+(couchy #982).
+
+The hook is pinned to the signatures of ComfyUI v0.42.5 (483dae4, the runtime manifest's
+commit). When they differ, the agent doesn't install it, logs why, and `GET /couchy/usage`
+reports `"scope_hook": "off"`.
+
+Logs name the prompt id, the run id and the refused node's class, never file paths.
 
 ## What this protects, and what it can't
 
@@ -133,7 +205,7 @@ anyone who can reach ComfyUI. `/comfyform/packs` is untouched.
 | Other people in the same Couchy workspace | Yes: the Couchy API checks ownership on every read and delete |
 | Another Couchy tenant on the same ComfyUI | Yes, against accidents and casual reads: each tenant has its own namespace and key |
 | Anyone on the network who can reach ComfyUI directly | Only if ComfyUI isn't reachable (below) |
-| **A tenant with `runs.start` on a shared server who sets out to read another tenant's files** | **No.** Running a graph is running code on that server: a custom node like "Load image from path" reads anything on its disk. Tenants who must not trust each other need separate ComfyUI processes (below) or separate servers |
+| **A tenant with `runs.start` on a shared server who sets out to read another tenant's files** | **Partly.** Stock nodes and packs that resolve files through `folder_paths` are held to the run's scope by the [scope hook](#the-scope-hook). But running a graph is running code on that server: a custom node like "Load image from path" that opens files itself reads anything on its disk. Tenants who must not trust each other need separate ComfyUI processes (below) or separate servers |
 | **Whoever runs the GPU host or the API host** | **No.** They can read the disk. ComfyUI must read inputs and write outputs as plain files, so encryption at rest buys nothing against the host |
 
 Also outside the guard: ComfyUI's assets system (off unless ComfyUI starts with
@@ -229,3 +301,14 @@ python3 -m unittest discover -s tests -t .
 ```
 
 The tests are plain Python. The route tests need `aiohttp`, which ComfyUI already installs.
+
+`tests/test_comfyui.py` runs the nodes, the hook and the queue wrap inside a real ComfyUI (its
+`folder_paths`, stock nodes, `validate_prompt`, `PromptExecutor` and `PromptQueue`, on the
+CPU). It's skipped unless `COMFYUI_PATH` names a checkout at the runtime manifest's commit, with
+ComfyUI's requirements installed:
+
+```sh
+git clone https://github.com/comfyanonymous/ComfyUI ~/ComfyUI && git -C ~/ComfyUI checkout 483dae4
+pip install -r ~/ComfyUI/requirements.txt
+COMFYUI_PATH=~/ComfyUI python3 -m unittest discover -s tests -t .
+```
