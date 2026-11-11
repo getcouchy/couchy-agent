@@ -1,0 +1,86 @@
+# Releases the agent when a pull request that bumps its version lands on main
+# (README, "Releasing"). If tag v<version> doesn't exist yet, it runs the unit
+# tests, builds, smokes and publishes the cloud image as :<version>
+# (publish-image.yml), then creates the tag and a GitHub release on that
+# commit. A push to main that doesn't bump the version finds its tag and stops.
+#
+# The tag is made last, so a tag always has an image behind it. It's made with
+# GITHUB_TOKEN, which doesn't trigger other workflows, so cloud-image.yml's tag
+# job doesn't build the same image twice.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      release: ${{ steps.check.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(python3 -c 'import re; print(re.search(r"__version__ = \"(.+)\"", open("couchy_agent/__init__.py").read()).group(1))')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${version}" --silent 2>/dev/null; then
+            echo "v${version} is already tagged; nothing to release." >> "$GITHUB_STEP_SUMMARY"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Releasing v${version}." >> "$GITHUB_STEP_SUMMARY"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install aiohttp
+      - run: python3 -m unittest discover -s tests -t .
+
+  image:
+    needs: [version, test]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish-image.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+    secrets: inherit
+
+  tag:
+    needs: [version, image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Tag and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.version.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$TAG" --generate-notes \
+            --notes "Cloud image: \`ghcr.io/getcouchy/couchy-comfyui:${VERSION}\`"
+          echo "Tagged ${TAG} at ${GITHUB_SHA} and published the image." >> "$GITHUB_STEP_SUMMARY"

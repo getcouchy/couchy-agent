@@ -1,0 +1,52 @@
+# Builds ghcr.io/getcouchy/couchy-comfyui:<version>, runs cloud/smoke.sh
+# against it on the CPU, and pushes it. Called by the release workflow (on a
+# version bump merged to main) and by the cloud image workflow (on a v* tag
+# pushed by hand); it alone may write packages. The package stays private.
+name: Publish cloud image
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The agent's version (couchy_agent/__init__.py); the image is pushed as :<version>.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/getcouchy/couchy-comfyui
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - id: pins
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: cloud/ci.sh pins
+      # couchyforms-helper is private: COUCHY_CLOUD_REPO_TOKEN can read it.
+      - uses: actions/checkout@v4
+        with:
+          repository: getcouchy/couchyforms-helper
+          ref: ${{ steps.pins.outputs.helper }}
+          token: ${{ secrets.COUCHY_CLOUD_REPO_TOKEN }}
+          path: .build/couchyforms-helper
+      - run: cloud/ci.sh build "${IMAGE}:${{ steps.pins.outputs.version }}"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: smoke-container-log
+          path: smoke-container.log
+      - name: Publish
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "${IMAGE}:${{ steps.pins.outputs.version }}"

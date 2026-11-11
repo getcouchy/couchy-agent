@@ -497,9 +497,12 @@ python main.py --port 8189 \
 
 1. Bump the version in `pyproject.toml` and `couchy_agent/__init__.py` together, in the
    pull request that ships the change (`tests/test_version.py` fails if they differ).
-2. Once it's on main, tag `v<version>` on that commit and push the tag. The tag builds and
-   publishes the cloud image as `:<version>` (`.github/workflows/cloud-image.yml`), and
-   fails unless it matches the agent's version.
+2. Merge it. The Release workflow (`.github/workflows/release.yml`) sees that `v<version>`
+   isn't tagged yet, runs the tests, builds, smokes and publishes the cloud image as
+   `:<version>`, then tags `v<version>` on that commit and creates a GitHub release. A merge
+   that doesn't bump the version releases nothing. If a run fails, fix it and re-run it from
+   the Actions tab (or Run workflow on main); pushing a `v<version>` tag by hand still
+   publishes the image too (`.github/workflows/cloud-image.yml`).
 3. Bump the API's `agent.Expected` in getcouchy/couchy in the pull request that needs the
    new release, so Couchy's Settings › Servers asks to update servers on an older one.
 
