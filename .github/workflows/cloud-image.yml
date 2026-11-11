@@ -1,8 +1,10 @@
 # Builds ghcr.io/getcouchy/couchy-comfyui, the image Couchy starts cloud GPUs
 # from (cloud/README.md), and runs cloud/smoke.sh against it on the CPU. A
 # pull request that changes the image builds and smokes it with read-only
-# permissions; a release tag v<version> does the same in its own job, which
-# alone may write packages, and publishes it as :<version>.
+# permissions. A release publishes it as :<version> through publish-image.yml,
+# the only job that may write packages: release.yml does that when a version
+# bump lands on main, and this workflow does it for a v<version> tag pushed by
+# hand.
 name: Cloud image
 
 on:
@@ -42,32 +44,25 @@ jobs:
           name: smoke-container-log
           path: smoke-container.log
 
-  release:
+  # A v* tag pushed by hand. Tags the release workflow makes (release.yml)
+  # don't start this, since that workflow publishes the image itself.
+  version:
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    permissions:
-      contents: read
-      packages: write
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.pins.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - id: pins
         run: cloud/ci.sh pins
-      - uses: actions/checkout@v4
-        with:
-          repository: getcouchy/couchyforms-helper
-          ref: ${{ steps.pins.outputs.helper }}
-          token: ${{ secrets.COUCHY_CLOUD_REPO_TOKEN }}
-          path: .build/couchyforms-helper
-      - run: cloud/ci.sh build "${IMAGE}:${{ steps.pins.outputs.version }}"
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: smoke-container-log
-          path: smoke-container.log
-      - name: Publish
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker push "${IMAGE}:${{ steps.pins.outputs.version }}"
+
+  release:
+    needs: version
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish-image.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+    secrets: inherit
