@@ -9,6 +9,7 @@ import unittest
 from aiohttp import FormData, web
 from aiohttp.test_utils import AioHTTPTestCase
 
+from couchy_agent import __version__
 from couchy_agent.routes import Agent, Folders
 from couchy_agent.store import Lockout, Store
 from tests.helpers import Tree
@@ -369,6 +370,29 @@ class RoutesTest(AioHTTPTestCase):
         self.agent.scope_hook, self.agent.node_version = "on", 1
         out = await (await self.client.get("/couchy/usage", headers=auth(self.ro))).json()
         self.assertEqual((out["scope_hook"], out["nodes"]), ("on", 1))
+
+    async def test_version_answers_any_paired_key(self):
+        await self.seed()
+        r = await self.client.post("/couchy/keys", json={"mode": "ro", "label": "no models", "models": "none"},
+                                   headers=auth(self.key))
+        self.assertEqual(r.status, 200)
+        none = (await r.json())["key"]
+        for key in (self.key, self.ro, none):
+            for path in ("/couchy/version", "/api/couchy/version"):
+                r = await self.client.get(path, headers=auth(key))
+                self.assertEqual(r.status, 200, path)
+                self.assertEqual(await r.json(), {"version": __version__, "nodes": None,
+                                                  "lockdown": "off", "scope_hook": "off"})
+        self.agent.scope_hook, self.agent.node_version, self.agent.lockdown = "on", 1, "on"
+        out = await (await self.client.get("/couchy/version", headers=auth(self.ro))).json()
+        self.assertEqual(out, {"version": __version__, "nodes": 1, "lockdown": "on", "scope_hook": "on"})
+
+    async def test_version_needs_a_key(self):
+        await self.seed()
+        for headers in ({}, auth("cak_wrong")):
+            r = await self.client.get("/couchy/version", headers=headers)
+            self.assertEqual(r.status, 401)
+            self.assertNotIn(__version__, await r.text())
 
     async def test_pairing_calls_on_paired(self):
         called = []

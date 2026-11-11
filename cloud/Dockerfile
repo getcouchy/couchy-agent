@@ -7,7 +7,7 @@
 #
 #   docker build -f cloud/Dockerfile \
 #     --build-context couchyforms-helper=../couchyforms-helper \
-#     -t ghcr.io/getcouchy/couchy-comfyui:0.6.0 .
+#     -t ghcr.io/getcouchy/couchy-comfyui:0.7.0 .
 FROM caddy:2.10.2 AS caddy
 
 FROM nvidia/cuda:13.0.3-cudnn-runtime-ubuntu24.04
