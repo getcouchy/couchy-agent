@@ -111,6 +111,7 @@ All routes are also served under `/api/`, like ComfyUI's own. `folder` is `input
 | Route | Does |
 | --- | --- |
 | `POST /couchy/pair {code, label}` | No key. Spends a code; answers `{namespace, key, keyId, mode: "rw", models}`. 403 for a wrong, used or expired code, 429 when locked out |
+| `GET /couchy/version` | Any key, `ro` and `models: none` included: `{version, nodes, lockdown: "on" \| "off", scope_hook: "on" \| "off"}`, `version` being this release (`couchy_agent.__version__`). Walks no folders, so the API reads it on every runtime check. 401 with no key, even outside lockdown, which is how Couchy tells "not paired" (401) from "not installed" (404) |
 | `GET /couchy/usage` | `{namespace, folders: {input, output: {count, bytes, owners: {<owner>: {count, bytes}}}}, permissions: "ok" \| "open", scope_hook: "on" \| "off", nodes: <version> \| null}`. Never file names. `nodes` is the version of [Couchy's nodes](#couchys-file-nodes) once they're registered, so the API knows it can swap them in |
 | `GET /couchy/files?folder&owner[&after][&limit]` | A page (at most 1000) of one owner's files: `{files: [{subfolder, filename, size, mtime}], total: {count, bytes}, next?}`. Pass `next` as `after` |
 | `POST /couchy/files/delete {folder, files: [{subfolder, filename}]}` | Answers `{deleted, missing, refused}`, each a list |
@@ -491,6 +492,16 @@ python main.py --port 8189 \
 ```
 
 (or one container each). It isn't the default, since it doubles GPU memory on a shared card.
+
+## Releasing
+
+1. Bump the version in `pyproject.toml` and `couchy_agent/__init__.py` together, in the
+   pull request that ships the change (`tests/test_version.py` fails if they differ).
+2. Once it's on main, tag `v<version>` on that commit and push the tag. The tag builds and
+   publishes the cloud image as `:<version>` (`.github/workflows/cloud-image.yml`), and
+   fails unless it matches the agent's version.
+3. Bump the API's `agent.Expected` in getcouchy/couchy in the pull request that needs the
+   new release, so Couchy's Settings › Servers asks to update servers on an older one.
 
 ## Test
 

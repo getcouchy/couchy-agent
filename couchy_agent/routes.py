@@ -12,7 +12,7 @@ import uuid
 
 from aiohttp import web
 
-from . import files, guard, perms
+from . import __version__, files, guard, perms
 from . import scope as scope_mod
 from .store import DEFAULT_MODELS, MODELS_GRANTS, Lockout, models_rank
 
@@ -103,6 +103,7 @@ class Agent:
         """files=False (store mode) leaves out the namespaced file routes."""
         for prefix in ("", "/api"):
             router.add_post(prefix + "/couchy/pair", self.pair)
+            router.add_get(prefix + "/couchy/version", self.version)
             if files:
                 router.add_get(prefix + "/couchy/usage", self.usage)
                 router.add_get(prefix + "/couchy/files", self.list_files)
@@ -162,6 +163,14 @@ class Agent:
         if self.on_paired is not None:
             self.on_paired()
         return web.json_response(result)
+
+    async def version(self, request):
+        # Any paired key, ro and models: none included. Cheap on purpose (no
+        # folder walks): the API reads it on every runtime check. Keyed even
+        # outside lockdown, so an open network doesn't learn the version.
+        self._need(request)
+        return web.json_response({"version": __version__, "nodes": self.node_version,
+                                  "lockdown": self.lockdown, "scope_hook": self.scope_hook})
 
     async def usage(self, request):
         g = self._need(request)

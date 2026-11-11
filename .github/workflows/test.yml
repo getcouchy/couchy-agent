@@ -1,0 +1,23 @@
+# The unit tests (README, "Test"), on every pull request and push to main.
+# tests/test_comfyui.py skips here: it needs a ComfyUI checkout.
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install aiohttp
+      - run: python3 -m unittest discover -s tests -t .
