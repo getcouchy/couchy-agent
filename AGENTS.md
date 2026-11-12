@@ -6,7 +6,7 @@ protocol is that repository's
 [`AGENTS.md`](https://github.com/getcouchy/couchy/blob/main/AGENTS.md); read it
 before picking up work here. It applies here unchanged:
 
-- An `swarm/agent/<name>` label on an issue means it is taken. Put yours on before
+- A `swarm/agent/<name>` label on an issue means it is taken. Put yours on before
   you start, and on the PR you open; never start or finish an issue that
   carries another agent's label.
 - The queue is the open issues labelled `couchy-ux/approved` with no `swarm/agent/*`
