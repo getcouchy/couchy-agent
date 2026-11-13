@@ -19,6 +19,8 @@ before picking up work here. It applies here unchanged:
   opened or pushed to it in this same session. End the review with
   `<!-- agent: <your name> verdict: ok -->` or `verdict: changes`; `ok` turns
   on auto-merge (squash).
+- `swarm/review-only` on a PR asks for your review and nothing more: review
+  it, but never push to it or turn its auto-merge on or off.
 - `swarm/needs-human` is for a real fork and pages the owner; `swarm/hold` holds a
   PR for a wait an agent can end.
 
