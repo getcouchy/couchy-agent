@@ -57,6 +57,7 @@ def setUpModule():
     couchy_nodes.configure(T.scopes)
     couchy_nodes.register("custom_nodes.couchy-agent")
     comfy_nodes.NODE_CLASS_MAPPINGS["CouchyTestExpand"] = Expand
+    comfy_nodes.NODE_CLASS_MAPPINGS["CouchyTestLatent"] = MakeLatent
     write_fixtures(T.tree)
 
 
@@ -84,6 +85,35 @@ class Expand:
         g = GraphBuilder()
         load = g.node("LoadImage", image="/".join(["couchy", NS, owner, "r0", "old.png"]) + " [output]")
         return {"result": (load.out(0),), "expand": g.finalize()}
+
+
+def make_latent(kind):
+    """A latent with fixed values: one tensor, a nested video and audio pair
+    (LTX's shapes), or one tensor with a noise mask."""
+    from comfy.nested_tensor import NestedTensor
+    g = torch.Generator().manual_seed(11)
+    if kind == "nested":
+        return {"samples": NestedTensor([torch.randn((1, 128, 16, 32, 24), generator=g),
+                                         torch.randn((1, 8, 126, 16), generator=g)])}
+    out = {"samples": torch.randn((1, 4, 8, 8), generator=g)}
+    if kind == "masked":
+        out["noise_mask"] = (torch.rand((1, 1, 64, 64), generator=g) > 0.5).float()
+    return out
+
+
+class MakeLatent:
+    """Outputs make_latent(kind)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"kind": (["plain", "nested", "masked"],)}}
+
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "go"
+    CATEGORY = "test"
+
+    def go(self, kind):
+        return (make_latent(kind),)
 
 
 def write_fixtures(t):
@@ -242,6 +272,95 @@ class NodesTest(unittest.TestCase):
         self.assertEqual(run(graph, scope(metadata=False)), (True, None))
         img = Image.open(T.tree.path(f"output/couchy/{NS}/u1/r1/ComfyUI_00001_.png"))
         self.assertEqual(img.text, {})
+
+
+class LatentTest(unittest.TestCase):
+    RUN = f"output/couchy/{NS}/u1/r1"
+
+    def setUp(self):
+        shutil.rmtree(T.tree.path(self.RUN), ignore_errors=True)
+
+    def save(self, kind):
+        """Runs MakeLatent into Couchy Save Latent; the file it wrote, relative to output/."""
+        graph = {"1": {"class_type": "CouchyTestLatent", "inputs": {"kind": kind}},
+                 "2": {"class_type": "CouchySaveLatent", "inputs": {"samples": ["1", 0]}}}
+        self.assertEqual(run(graph, scope()), (True, None))
+        names = sorted(os.listdir(T.tree.path(self.RUN)))
+        self.assertTrue(names and names[-1].endswith("_.latent"), names)
+        return f"couchy/{NS}/u1/r1/{names[-1]}"
+
+    def as_upload(self, rel, upload):
+        """Copies an output file into u1's uploads as <upload>.latent."""
+        shutil.copy(T.tree.path(f"output/{rel}"), T.tree.path(f"input/couchy/{NS}/u1/{upload}.latent"))
+
+    def load(self, upload):
+        sc = scope(inputs=(upload,))
+        return in_context(sc, lambda: couchy_nodes.CouchyLoadLatent.execute(upload).args[0])
+
+    def test_the_latent_nodes_register(self):
+        for node_id, display in (("CouchySaveLatent", "Couchy Save Latent"), ("CouchyLoadLatent", "Couchy Load Latent")):
+            self.assertEqual(comfy_nodes.NODE_DISPLAY_NAME_MAPPINGS[node_id], display)
+            self.assertEqual(comfy_nodes.NODE_CLASS_MAPPINGS[node_id].GET_SCHEMA().category, "couchy")
+
+    def test_couchy_save_then_stock_load(self):
+        rel = self.save("plain")
+        self.assertEqual(rel, f"couchy/{NS}/u1/r1/ComfyUI_00001_.latent")  # the run's folder, stock's numbering
+        (got,) = in_context(scope(), lambda: comfy_nodes.LoadLatent().load(rel + " [output]"))
+        self.assertTrue(torch.equal(got["samples"], make_latent("plain")["samples"]))
+
+    def test_stock_save_then_couchy_load(self):
+        want = make_latent("plain")
+        out = comfy_nodes.SaveLatent().save(want, filename_prefix="stocklatent", prompt={"p": 1}, extra_pnginfo=WORKFLOW)
+        rel = out["ui"]["latents"][0]["filename"]
+        self.as_upload(rel, "stocklat")
+        self.assertTrue(torch.equal(self.load("stocklat")["samples"], want["samples"]))
+
+    def test_one_tensor_is_written_as_stock_writes_it(self):
+        from safetensors import safe_open
+        mine = T.tree.path(f"output/{self.save('plain')}")
+        out = comfy_nodes.SaveLatent().save(make_latent("plain"), filename_prefix="stockkeys", prompt={"p": 1},
+                                            extra_pnginfo=WORKFLOW)
+        theirs = T.tree.path(f"output/{out['ui']['latents'][0]['filename']}")
+        with safe_open(mine, "pt") as a, safe_open(theirs, "pt") as b:
+            self.assertEqual(sorted(a.keys()), sorted(b.keys()))
+            self.assertEqual(sorted(a.metadata()), sorted(b.metadata()))
+            self.assertEqual(json.loads(a.metadata()["workflow"]), WORKFLOW["workflow"])
+            for k in a.keys():
+                self.assertTrue(torch.equal(a.get_tensor(k), b.get_tensor(k)), k)
+
+    def test_a_nested_latent_round_trips(self):
+        self.as_upload(self.save("nested"), "nested")
+        got, want = self.load("nested")["samples"], make_latent("nested")["samples"]
+        self.assertTrue(got.is_nested)
+        self.assertEqual(len(got.tensors), 2)
+        for a, b in zip(got.tensors, want.tensors):
+            self.assertTrue(torch.equal(a, b))
+
+    def test_the_noise_mask_round_trips(self):
+        self.as_upload(self.save("masked"), "masked")
+        got, want = self.load("masked"), make_latent("masked")
+        self.assertTrue(torch.equal(got["samples"], want["samples"]))
+        self.assertTrue(torch.equal(got["noise_mask"], want["noise_mask"]))
+
+    def test_load_refuses_an_upload_outside_the_run(self):
+        self.as_upload(self.save("plain"), "mine")
+        with self.assertRaises(s.NotInRun) as e:
+            in_context(scope(inputs=("up1",)), lambda: couchy_nodes.CouchyLoadLatent.execute("mine"))
+        self.assertEqual(str(e.exception), "This file isn't part of this run. (Couchy Load Latent)")
+        ok, line = run({"1": {"class_type": "CouchyLoadLatent", "inputs": {"upload": "mine"}},
+                        "2": {"class_type": "CouchySaveLatent", "inputs": {"samples": ["1", 0]}}}, scope(inputs=("up1",)))
+        self.assertFalse(ok)
+        self.assertIn("This file isn't part of this run. (Couchy Load Latent)", line)
+
+    def test_save_ignores_a_prefix_and_needs_a_run(self):
+        # A graph carried over from stock SaveLatent keeps its filename_prefix; it is dropped.
+        graph = {"1": {"class_type": "CouchyTestLatent", "inputs": {"kind": "plain"}},
+                 "2": {"class_type": "CouchySaveLatent", "inputs": {"samples": ["1", 0], "filename_prefix": "../../x"}}}
+        self.assertEqual(run(graph, scope()), (True, None))
+        self.assertEqual(os.listdir(T.tree.path(self.RUN)), ["ComfyUI_00001_.latent"])
+        ok, line = run(graph)
+        self.assertFalse(ok)
+        self.assertIn("This node only runs in runs Couchy starts. (Couchy Save Latent)", line)
 
 
 class HookTest(unittest.TestCase):

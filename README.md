@@ -354,7 +354,7 @@ key, has no scope.
 
 ## Couchy's file nodes
 
-On a paired server the agent registers five V3 nodes (`comfy_api.latest`) under the category
+On a paired server the agent registers seven V3 nodes (`comfy_api.latest`) under the category
 `couchy`. A server paired after start-up gets them at pairing. They take an upload id, not a
 path, and the work is the stock node's on the resolved file, so outputs, EXIF and alpha handling,
 numbering and PNG metadata are ComfyUI's own.
@@ -366,11 +366,36 @@ numbering and PNG metadata are ComfyUI's own.
 | `CouchyLoadVideo` | Couchy Load Video | `LoadVideo` (core) | `upload` | As above. VIDEO |
 | `CouchySaveImage` | Couchy Save Image | `SaveImage` | `images` | Writes `output/couchy/<ns>/<owner>/<runId>/ComfyUI_00001_.png` ..., whatever prefix the graph had |
 | `CouchyPreviewImage` | Couchy Preview Image | `PreviewImage` | `images` | Writes to `temp/couchy/<ns>/<owner>/<runId>/` |
+| `CouchySaveLatent` | Couchy Save Latent | `SaveLatent` | `samples` | Writes `output/couchy/<ns>/<owner>/<runId>/ComfyUI_00001_.latent` ..., whatever prefix the graph had, nested members and noise mask included (below). Listed under `latents` in ComfyUI's history, as stock does. Returns the latent unchanged |
+| `CouchyLoadLatent` | Couchy Load Latent | `LoadLatent` | `upload` | Opens `input/couchy/<ns>/<owner>/<upload>.latent` when the upload is in the run's scope. LATENT |
 
 Without a run scope (someone in ComfyUI's own UI) each fails with "This node only runs in runs
 Couchy starts."; an upload that isn't in the scope fails with "This file isn't part of this
 run.", naming the node. Saves are never answered from another run's cache. Video saves keep the
 API's prefix rewrite; there's no Couchy video save node.
+
+`nodes` in `GET /couchy/usage` and `/couchy/version` is 2 since the latent nodes (1 before).
+
+### The latent file
+
+Stock `SaveLatent` keeps one tensor, so it drops half of a nested latent (LTX's joint video and
+audio latent) and any noise mask. The latent nodes write a superset of its safetensors file
+instead:
+
+| Key | Holds |
+| --- | --- |
+| `latent_tensor` | The samples, when they are one tensor (stock's key) |
+| `latent_format_version_0` | An empty tensor, as stock writes (stock's key) |
+| `latent_tensor.0`, `latent_tensor.1` ... | Each member of nested samples, in order, in place of `latent_tensor` |
+| `noise_mask` | The noise mask, when the latent has one |
+| `noise_mask.0`, `noise_mask.1` ... | Each member of a nested noise mask |
+
+The metadata is stock's: `prompt` and one key per workflow entry, each JSON, with an empty
+`prompt` when the run asks for no metadata. A latent with one tensor and no mask is written with
+exactly stock's keys and metadata, so stock `LoadLatent` opens it and Couchy Load Latent opens
+a stock file (scaling one older than `latent_format_version_0` as stock does). Stock
+`LoadLatent` can't open a nested latent. Loading restores nested members as ComfyUI's
+`NestedTensor`, samples as float as stock does, and the mask as it was saved.
 
 ## The scope hook
 
