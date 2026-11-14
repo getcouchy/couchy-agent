@@ -11,6 +11,12 @@ metadata are ComfyUI's own:
     CouchyLoadVideo     LoadVideo       upload             VIDEO
     CouchySaveImage     SaveImage       images             to output/couchy/<ns>/<owner>/<runId>/
     CouchyPreviewImage  PreviewImage    images             to temp/couchy/<ns>/<owner>/<runId>/
+    CouchySaveLatent    SaveLatent      samples            to output/couchy/<ns>/<owner>/<runId>/
+    CouchyLoadLatent    LoadLatent      upload             LATENT
+
+The latent nodes write and read latents.py's file, stock's plus nested
+members and the noise mask, rather than calling the stock node, which keeps
+only one tensor.
 
 Without a run scope each fails with "This node only runs in runs Couchy
 starts."; an upload that isn't in the scope fails with "This file isn't part
@@ -26,6 +32,7 @@ import nodes as comfy_nodes
 from comfy_api.latest import ComfyExtension, io
 from comfy_execution.utils import get_executing_context
 
+from . import latents
 from . import scope as scope_mod
 from .files import TOP, valid_id
 
@@ -274,7 +281,73 @@ class CouchyPreviewImage(io.ComfyNode):
         return _save_fingerprint()
 
 
-NODES = [CouchyLoadImage, CouchyLoadMask, CouchyLoadVideo, CouchySaveImage, CouchyPreviewImage]
+class CouchySaveLatent(io.ComfyNode):
+    DISPLAY = "Couchy Save Latent"  # read by the node's own methods, which can't ask for the schema
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="CouchySaveLatent",
+            display_name=cls.DISPLAY,
+            category=CATEGORY,
+            description="Saves the latent to this run's folder, nested members and noise mask included.",
+            inputs=[io.Latent.Input("samples", tooltip="The latent to save.")],
+            outputs=[io.Latent.Output("samples")],
+            hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
+            is_output_node=True,
+        )
+
+    @classmethod
+    def execute(cls, samples) -> io.NodeOutput:
+        from comfy.cli_args import args
+        scope = _scope(cls.DISPLAY)
+        prefix = f"{TOP}/{scope.namespace}/{scope.owner}/{scope.run_id}/{SAVE_NAME}"
+        output_dir = folder_paths.get_output_directory()
+        folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(prefix, output_dir)
+        name = f"{filename}_{counter:05}_.latent"
+        meta = None
+        if not args.disable_metadata:
+            meta = (latents.metadata(cls.hidden.prompt, cls.hidden.extra_pnginfo) if scope.metadata
+                    else latents.metadata(None, None))
+        latents.save(os.path.join(folder, name), samples, meta)
+        return io.NodeOutput(samples, ui={"latents": [{"filename": name, "subfolder": subfolder, "type": "output"}]})
+
+    @classmethod
+    def fingerprint_inputs(cls, **kwargs):
+        return _save_fingerprint()
+
+
+class CouchyLoadLatent(io.ComfyNode):
+    DISPLAY = "Couchy Load Latent"  # read by the node's own methods, which can't ask for the schema
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="CouchyLoadLatent",
+            display_name=cls.DISPLAY,
+            category=CATEGORY,
+            description="Loads a latent this run was given, by its Couchy upload id.",
+            inputs=[_upload_input()],
+            outputs=[io.Latent.Output()],
+        )
+
+    @classmethod
+    def execute(cls, upload) -> io.NodeOutput:
+        from comfy.nested_tensor import NestedTensor
+        path = folder_paths.get_annotated_filepath(_resolve(cls, upload))
+        return io.NodeOutput(latents.load(path, NestedTensor))
+
+    @classmethod
+    def fingerprint_inputs(cls, upload):
+        return _load_fingerprint(cls, upload)
+
+    @classmethod
+    def validate_inputs(cls, upload=None):
+        return _load_validate(cls, upload)
+
+
+NODES = [CouchyLoadImage, CouchyLoadMask, CouchyLoadVideo, CouchySaveImage, CouchyPreviewImage,
+         CouchySaveLatent, CouchyLoadLatent]
 
 
 class CouchyExtension(ComfyExtension):
