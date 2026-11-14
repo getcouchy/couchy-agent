@@ -1,33 +1,39 @@
 # Agents working on couchy-agent
 
-Claude, Codex and Grok agents work this repository as part of the same tick
-that covers [getcouchy/couchy](https://github.com/getcouchy/couchy). The
-protocol is that repository's
-[`AGENTS.md`](https://github.com/getcouchy/couchy/blob/main/AGENTS.md); read it
-before picking up work here. It applies here unchanged:
+Claude, Codex and Grok agents work this repository under the same protocol as
+[getcouchy/couchy](https://github.com/getcouchy/couchy). The protocol and the
+tools that run it live in **[getcouchy/swarm](https://github.com/getcouchy/swarm)**:
+read its [`PROTOCOL.md`](https://github.com/getcouchy/swarm/blob/main/PROTOCOL.md)
+before picking up work here. This file adds only what is this repository's own.
 
-- A `swarm/agent/<name>` label on an issue or PR means that agent is working
-  on it right now: a lock, not ownership. Put yours on before you change
-  anything for it and take it off when your tick ends. Once it is off, the
-  work is anyone's to carry on.
-- Put `swarm/pr` on every PR you open. That label is what makes a PR the
-  agents' to review, fix and merge, whoever opened it.
-- The queue is the open issues labelled `couchy-ux/approved` with no
-  `swarm/agent/*` label and no open PR, whose blockers are closed. A blocker is
-  often in the other repository ("Blocked by getcouchy/couchy#1203").
-- Any `swarm/pr` PR here that nobody is on is yours to review, unless you
-  opened or pushed to it in this same session. End the review with
-  `<!-- agent: <your name> verdict: ok -->` or `verdict: changes`; `ok` turns
-  on auto-merge (squash).
-- `swarm/review-only` on a PR asks for your review and nothing more: review
-  it, but never push to it or turn its auto-merge on or off.
-- `swarm/needs-human` is for a real fork and pages the owner; `swarm/hold` holds a
-  PR for a wait an agent can end.
+## Getting the protocol and the tools
 
-What differs here:
+getcouchy/swarm is public, so your sandbox can clone it without being given
+access. At the start of every tick, beside your checkout of this repository:
 
-- The Agent desk and the heartbeats are in getcouchy/couchy. Nothing sweeps
-  this repository, so a label left on here stays until someone removes it:
-  take yours off every time.
-- There is no changelog check and no simulator flow. Run `python3 -m unittest discover -s tests -t .` (README, "Test")
-  before you push.
+```bash
+git clone --depth 1 https://github.com/getcouchy/swarm ../swarm   # or: git -C ../swarm pull --ff-only
+```
+
+Then read `../swarm/PROTOCOL.md`. With a token, run the tools from this checkout
+with this repository as home: `GITHUB_REPOSITORY=getcouchy/couchy-agent
+AGENT_REPOS=getcouchy/couchy-agent AGENT_NAME=<your name> node ../swarm/agent.mjs next`.
+
+## Home repository
+
+A tick whose prompt names this repository has it as its home: the Agent desk
+(the open `swarm/desk` issue here) and its heartbeat are here, and
+`.github/workflows/agent-sweep.yml` sweeps it every hour, freeing lapsed
+claims and keeping that desk current. A tick of getcouchy/couchy covers this
+repository too when its sandbox can reach it, and heartbeats on couchy's desk.
+
+Issues here are often blocked by issues in getcouchy/couchy ("Blocked by
+getcouchy/couchy#1203"). A tick that can't read couchy counts such a blocker as
+open and passes the issue by; it is couchy's ticks that can take it.
+
+## This repository's rules
+
+- There is no changelog check and no simulator flow. Run
+  `python3 -m unittest discover -s tests -t .` (README, "Test") before you push.
+- `reviewed` is not a required check here, so auto-merge goes on with an `ok`
+  verdict (the protocol's "Merging"), not when a PR opens.
