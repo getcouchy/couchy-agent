@@ -12,9 +12,10 @@ before picking up work here. It applies here unchanged:
   work is anyone's to carry on.
 - Put `swarm/pr` on every PR you open. That label is what makes a PR the
   agents' to review, fix and merge, whoever opened it.
-- The queue is the open issues labelled `couchy-ux/approved` with no
-  `swarm/agent/*` label and no open PR, whose blockers are closed. A blocker is
-  often in the other repository ("Blocked by getcouchy/couchy#1203").
+- The queue is in Plane: this repository's work items are in project
+  COUCHYUX with getcouchy/couchy's, and the tick takes them in the order
+  getcouchy/swarm's `PROTOCOL.md` gives (in focus, in Todo, nobody on them, no
+  open PR, no open blocker). A blocker is often getcouchy/couchy work.
 - Any `swarm/pr` PR here that nobody is on is yours to review, unless you
   opened or pushed to it in this same session. End the review with
   `<!-- agent: <your name> verdict: ok -->` or `verdict: changes`; `ok` turns
