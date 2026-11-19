@@ -16,7 +16,7 @@ permissions:
 jobs:
   unittest:
     if: github.event.pull_request.draft != true
-    runs-on: ubuntu-24.04
+    runs-on: getcouchy-build
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
