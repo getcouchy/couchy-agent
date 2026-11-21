@@ -12,8 +12,8 @@ before picking up work here. It applies here unchanged:
   work is anyone's to carry on.
 - Put `swarm/pr` on every PR you open. That label is what makes a PR the
   agents' to review, fix and merge, whoever opened it.
-- The queue is in Plane: this repository's work items are in project
-  COUCHYUX with getcouchy/couchy's, and the tick takes them in the order
+- The queue is in Linear: this repository's work items are in the Couchy
+  team (keys like `COU-12`) with getcouchy/couchy's, and the tick takes them in the order
   getcouchy/swarm's `PROTOCOL.md` gives (in focus, in Todo, nobody on them, no
   open PR, no open blocker). A blocker is often getcouchy/couchy work.
 - Any `swarm/pr` PR here that nobody is on is yours to review, unless you
