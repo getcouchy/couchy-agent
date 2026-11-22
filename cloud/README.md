@@ -112,6 +112,7 @@ without Docker.
 
 ## Pulling it
 
-GHCR packages from a private repository are private. RunPod and Vast.ai need registry
+The package is private, although this repository is public: the image holds couchyforms-helper,
+which is private, so never make the package public. RunPod and Vast.ai need registry
 credentials for `ghcr.io` (a token with `read:packages`), in RunPod's pod template or Vast's
-instance login, or the package made public.
+instance login.
