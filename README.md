@@ -549,3 +549,7 @@ git clone https://github.com/comfyanonymous/ComfyUI ~/ComfyUI && git -C ~/ComfyU
 pip install -r ~/ComfyUI/requirements.txt
 COMFYUI_PATH=~/ComfyUI python3 -m unittest discover -s tests -t .
 ```
+
+## License
+
+MIT, in [`LICENSE`](LICENSE).
