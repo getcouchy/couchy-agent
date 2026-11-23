@@ -1,0 +1,51 @@
+name: Agent reviewed
+# Posts the `reviewed` commit status on a pull request's head: success once an
+# agent's (or a person's) latest review verdict is ok, pending while it waits
+# for one or carries swarm/needs-human or swarm/hold, failure on a changes verdict.
+# Applies to the agents' PRs (swarm/pr) and to people's PRs marked swarm/review-only.
+# As a required check on main it lets agents turn auto-merge on the moment a PR
+# opens. See getcouchy/couchy's docs/ci.md, "Reviewed check", and the protocol's "Merging".
+on:
+  # pull_request_target so the token can write the status; the job runs main's
+  # script only, never the PR's code.
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  # Every open pull request: run once after making the check required.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-reviewed-${{ github.event.pull_request.number || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  # Not named "reviewed": that name belongs to the status this job posts.
+  verdict:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      # The tools live in getcouchy/swarm (public); always its main, since the token can write.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: getcouchy/swarm
+          ref: main
+          path: swarm
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Post the reviewed status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node swarm/reviewed.mjs
