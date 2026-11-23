@@ -33,8 +33,10 @@ work: Linear's "blocked by" relation names it, or the description does
 
 A tick whose prompt names this repository has it as its home: its Agent desk
 is the open `swarm/desk` work item that belongs to this repository, and its
-heartbeat goes there. `.github/workflows/agent-sweep.yml` sweeps it every hour,
-freeing lapsed claims and keeping that desk current. A tick of getcouchy/couchy
+heartbeat goes there. The swarm's sweep runs for this repository every 10
+minutes, beside getcouchy/couchy's (a CronJob in getcouchy/ops,
+`k8s/charts/couchy-swarm`), freeing lapsed claims and keeping that desk
+current. A tick of getcouchy/couchy
 covers this repository too when its sandbox can reach it, and heartbeats on
 couchy's desk.
 
