@@ -3,7 +3,10 @@
 name: Test
 
 on:
+  # Not on a draft PR (the job's if); ready_for_review runs it when the draft
+  # is marked ready.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -12,6 +15,10 @@ permissions:
 
 jobs:
   unittest:
+    if: github.event.pull_request.draft != true
+    # GitHub's runners, never the getcouchy build pool: the repository is
+    # public, so a pull request from a fork could run its code on a
+    # self-hosted runner. A public repository's hosted minutes are free.
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

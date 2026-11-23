@@ -28,7 +28,7 @@ MAX_INPUTS = 10000
 # Reported as "nodes" in GET /couchy/usage once Couchy's nodes are
 # registered, so the API knows it can swap them in. Bump it when a node's
 # inputs or outputs change.
-NODES_VERSION = 1
+NODES_VERSION = 2  # 2: Couchy Save Latent and Couchy Load Latent
 
 
 class NotInRun(Exception):

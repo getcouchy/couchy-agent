@@ -10,7 +10,10 @@ name: Cloud image
 on:
   push:
     tags: ["v*"]
+  # Not on a draft PR (the job's if); ready_for_review runs it when the draft
+  # is marked ready.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths: ["cloud/**", "couchy_agent/**", "__init__.py", ".github/workflows/cloud-image.yml"]
   workflow_dispatch:
 
@@ -22,7 +25,7 @@ env:
 
 jobs:
   image:
-    if: github.ref_type != 'tag'
+    if: github.ref_type != 'tag' && github.event.pull_request.draft != true
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
