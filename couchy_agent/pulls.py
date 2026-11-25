@@ -48,6 +48,10 @@ KNOWN_CDNS = (re.compile(r"^civitai-delivery-worker-prod\.[0-9a-f]{32}\.r2\.clou
 
 TICKET_HEADER = "X-Couchy-Agent-Ticket"
 
+# A safetensors header may be this long when it's read only to tell a model
+# file from a web page: some models' are over read_header's 1 MB.
+UNHASHED_HEADER_CAP = 100 * 1024 * 1024
+
 MAX_RUNNING = 2
 MAX_REDIRECTS = 5
 CHUNK = 4 * 1024 * 1024
@@ -174,11 +178,13 @@ def rename_noreplace(src, dst):
 class Pull:
     def __init__(self, id, sha256, location, folder, path, size, source):
         self.id = id
-        self.sha256 = sha256
+        self.sha256 = sha256  # None until it lands, for a link whose hash isn't known
+        self.hashed = sha256 is not None
         self.location = location
         self.folder = folder
         self.path = path
-        self.size = size
+        self.size = size  # None until the link says, when it isn't known
+        self.sized = size is not None
         self._source = source  # memory only: never logged, never on disk
         self.state = "queued"
         self.bytes_done = 0
@@ -195,7 +201,9 @@ class Pull:
         return self.state in ("queued", "running", "verifying")
 
     def view(self):
-        out = {"id": self.id, "state": self.state, "bytesDone": self.bytes_done, "bytesTotal": self.size}
+        out = {"id": self.id, "state": self.state, "bytesDone": self.bytes_done, "bytesTotal": self.size or 0}
+        if self.state == "done":
+            out["sha256"] = self.sha256
         if self.error:
             out["error"] = self.error
         return out
@@ -233,6 +241,36 @@ def parse_source(source):
     raise BadPull(SOURCES)
 
 
+def link_of(source):
+    """What tells one link from another, without the site's token, which may
+    change; None for a peer or a presigned URL."""
+    if "url" not in source:
+        return None
+    u = urllib.parse.urlsplit(source["url"])
+    query = [p for p in urllib.parse.parse_qsl(u.query, keep_blank_values=True) if p[0] != "token"]
+    return hashlib.sha256("\0".join((u.scheme, u.netloc, u.path, repr(query))).encode()).hexdigest()
+
+
+def check_model_file(path, name):
+    """Failed unless the file at path is what name says it is: an unknown
+    link can answer a sign-in page. A pickle has no such mark, and only a host
+    that allows them pulls one."""
+    ext = os.path.splitext(name)[1].lower()
+    if ext == ".gguf":
+        with open(path, "rb") as f:
+            ok = f.read(4) == b"GGUF"
+    elif ext in SAFE_FORMATS:
+        try:
+            models.read_header(path, cap=UNHASHED_HEADER_CAP)
+            ok = True
+        except models.NotSafetensors:
+            ok = False
+    else:
+        ok = os.path.getsize(path) > 0
+    if not ok:
+        raise Failed("not_a_model")
+
+
 class Pulls:
     def __init__(self, locations, hasher, config, max_running=MAX_RUNNING, chunk=CHUNK, clock=time.time,
                  session=None):
@@ -251,8 +289,10 @@ class Pulls:
     def start(self, body, locs):
         """Start a pull from the route's body, or answer the one already
         running for the same file and target. Raises BadPull."""
+        source = parse_source(body.get("source"))
+        # A link may come without what its file is: it's hashed as it lands.
         sha = body.get("sha256")
-        if not valid_sha(sha):
+        if (sha is not None or "url" not in source) and not valid_sha(sha):
             raise BadPull("sha256 must be 64 lowercase hex characters")
         location = body.get("location", models.HOST)
         if location not in locs:
@@ -264,17 +304,30 @@ class Pulls:
         if models.split_path(path) is None:
             raise BadPull("path must be a plain relative path, with /")
         size = body.get("size")
-        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        if (size is not None or "url" not in source) and (
+                not isinstance(size, int) or isinstance(size, bool) or size <= 0):
             raise BadPull("size must be the file's size in bytes")
-        source = parse_source(body.get("source"))
-        pid = pull_id(sha, location, folder, path)
+        # With no hash to tell files apart, the link does.
+        pid = pull_id(sha or link_of(source), location, folder, path)
         old = self._pulls.get(pid)
-        if old is not None and old.active:
+        if old is not None and (old.active or self._landed(old, source, locs)):
             return old
         self._prune()
         pull = self._pulls[pid] = Pull(pid, sha, location, folder, path, size, source)
         pull.task = asyncio.get_running_loop().create_task(self._run(pull))
         return pull
+
+    def _landed(self, old, source, locs):
+        """Whether old pulled this link with no known hash and its file is
+        still there: asked again after a restart of the API, it's done."""
+        if old.hashed or old.state != "done":  # its id holds the link
+            return False
+        real = models.resolve(locs[old.location].get(old.folder, []), old.path)
+        if real is None:
+            return False
+        st = os.lstat(real)
+        known = self.hasher.index.lookup(old.location, old.folder, old.path, st.st_size, st.st_mtime)
+        return bool(known) and known.get("sha256") == old.sha256
 
     def get(self, pid):
         return self._pulls.get(pid)
@@ -329,7 +382,7 @@ class Pulls:
             request = self._request(pull)  # refusals come before queueing
             async with self._sem:
                 pull.state = "running"
-                log.info("model pull started", extra=pull._fields(bytes=pull.size))
+                log.info("model pull started", extra=pull._fields(bytes=pull.size or 0))
                 await self._fetch(pull, request)
         except asyncio.CancelledError:
             if pull.partial:
@@ -405,16 +458,25 @@ class Pulls:
             else:
                 raise Failed(_refusal(resp.status, kind), keep_partial=True)
             pull.bytes_done = have
+            if not pull.sized:
+                pull.size = resp.content_length
+                if pull.size is not None:
+                    await asyncio.to_thread(self._check_room, partial, pull.size)
             if resp.status in (200, 206):
                 await self._stream(pull, resp, partial, sha)
         finally:
             if resp is not None:
                 resp.release()
         pull.state = "verifying"
+        if pull.size is None:
+            pull.size = pull.bytes_done
         if pull.bytes_done != pull.size:
-            raise Failed("size_mismatch", keep_partial=pull.bytes_done < pull.size)
-        if sha.hexdigest() != pull.sha256:
+            raise Failed("size_mismatch", keep_partial=pull.sized and pull.bytes_done < pull.size)
+        if pull.hashed and sha.hexdigest() != pull.sha256:
             raise Failed("hash_mismatch")
+        if not pull.hashed:
+            await asyncio.to_thread(check_model_file, partial, pull.path)
+            pull.sha256 = sha.hexdigest()
         await asyncio.to_thread(self._place, pull, partial, target)
 
     async def _open(self, url, headers, kind, offset):
@@ -446,13 +508,17 @@ class Pulls:
             buf = bytearray()
             async for chunk in resp.content.iter_chunked(1024 * 1024):
                 buf += chunk
-                if pull.bytes_done + len(buf) > pull.size:
+                if pull.size is not None and pull.bytes_done + len(buf) > pull.size:
                     raise Failed("size_mismatch")
                 if len(buf) >= self.chunk:
+                    if pull.size is None:
+                        await asyncio.to_thread(self._check_room, partial, len(buf))
                     await asyncio.to_thread(_write, fd, sha, bytes(buf))
                     pull.bytes_done += len(buf)
                     buf.clear()
             if buf:
+                if pull.size is None:
+                    await asyncio.to_thread(self._check_room, partial, len(buf))
                 await asyncio.to_thread(_write, fd, sha, bytes(buf))
                 pull.bytes_done += len(buf)
             await asyncio.to_thread(os.fsync, fd)
@@ -460,6 +526,11 @@ class Pulls:
             await asyncio.to_thread(os.close, fd)
 
     # On disk (run in a thread) ----------------------------------------------------
+
+    def _check_room(self, partial, size):
+        """Failed unless size more bytes leave the reserve free."""
+        if shutil.disk_usage(os.path.dirname(partial)).free - size < self.config.reserve_bytes():
+            raise Failed("no_room")
 
     def _folder_dirs(self, pull):
         locs = self.locations.all()
@@ -478,7 +549,7 @@ class Pulls:
         if existing is not None:
             st = os.lstat(existing)
             known = self.hasher.index.lookup(pull.location, pull.folder, pull.path, st.st_size, st.st_mtime)
-            if known and known.get("sha256") == pull.sha256:
+            if known and pull.sha256 is not None and known.get("sha256") == pull.sha256:
                 return True
         raise Failed("exists")
 
@@ -487,6 +558,8 @@ class Pulls:
         (None, ...) when the file is already in place."""
         dirs = self._folder_dirs(pull)
         if self._same_file_there(pull, dirs):
+            if pull.size is None:
+                pull.size = os.path.getsize(models.resolve(dirs, pull.path))
             pull.bytes_done = pull.size
             return None, None, 0, None
         folder_dir = dirs[0]
@@ -529,11 +602,12 @@ class Pulls:
             if not os.path.isfile(partial) or os.path.islink(partial):
                 raise Failed("io")
             have = st.st_size
-            if have > pull.size:
+            # With no hash or size to tell whose bytes these are, start over.
+            if not pull.hashed or not pull.sized or have > pull.size:
                 _truncate(partial)
                 have = 0
         free = shutil.disk_usage(pdir).free
-        if free - (pull.size - have) < self.config.reserve_bytes():
+        if free - ((pull.size or 0) - have) < self.config.reserve_bytes():
             raise Failed("no_room", keep_partial=True)
         sha = hashlib.sha256()
         if have:
