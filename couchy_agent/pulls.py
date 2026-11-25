@@ -186,7 +186,6 @@ class Pull:
         self.size = size  # None until the link says, when it isn't known
         self.sized = size is not None
         self._source = source  # memory only: never logged, never on disk
-        self._link = link_of(source)
         self.state = "queued"
         self.bytes_done = 0
         self.error = None
@@ -243,12 +242,13 @@ def parse_source(source):
 
 
 def link_of(source):
-    """What tells one link from another, without its query, which holds a
-    token that may change; None for a peer or a presigned URL."""
+    """What tells one link from another, without the site's token, which may
+    change; None for a peer or a presigned URL."""
     if "url" not in source:
         return None
     u = urllib.parse.urlsplit(source["url"])
-    return hashlib.sha256("\0".join((u.scheme, u.netloc, u.path)).encode()).hexdigest()
+    query = [p for p in urllib.parse.parse_qsl(u.query, keep_blank_values=True) if p[0] != "token"]
+    return hashlib.sha256("\0".join((u.scheme, u.netloc, u.path, repr(query))).encode()).hexdigest()
 
 
 def check_model_file(path, name):
@@ -291,8 +291,8 @@ class Pulls:
         running for the same file and target. Raises BadPull."""
         source = parse_source(body.get("source"))
         # A link may come without what its file is: it's hashed as it lands.
-        sha = body.get("sha256") or (None if "url" in source else "")
-        if sha is not None and not valid_sha(sha):
+        sha = body.get("sha256")
+        if (sha is not None or "url" not in source) and not valid_sha(sha):
             raise BadPull("sha256 must be 64 lowercase hex characters")
         location = body.get("location", models.HOST)
         if location not in locs:
@@ -307,7 +307,8 @@ class Pulls:
         if (size is not None or "url" not in source) and (
                 not isinstance(size, int) or isinstance(size, bool) or size <= 0):
             raise BadPull("size must be the file's size in bytes")
-        pid = pull_id(sha or "", location, folder, path)
+        # With no hash to tell files apart, the link does.
+        pid = pull_id(sha or link_of(source), location, folder, path)
         old = self._pulls.get(pid)
         if old is not None and (old.active or self._landed(old, source, locs)):
             return old
@@ -319,7 +320,7 @@ class Pulls:
     def _landed(self, old, source, locs):
         """Whether old pulled this link with no known hash and its file is
         still there: asked again after a restart of the API, it's done."""
-        if old.hashed or old.state != "done" or old._link is None or old._link != link_of(source):
+        if old.hashed or old.state != "done":  # its id holds the link
             return False
         real = models.resolve(locs[old.location].get(old.folder, []), old.path)
         if real is None:

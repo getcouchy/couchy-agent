@@ -19,7 +19,7 @@ from couchy_agent.config import Config
 from couchy_agent.hashing import Hasher, Index
 from couchy_agent.models_routes import ModelsRoutes
 from couchy_agent.obs import JsonFormatter
-from couchy_agent.pulls import TICKET_HEADER, Pulls, pull_id
+from couchy_agent.pulls import TICKET_HEADER, Pulls, link_of, pull_id
 from couchy_agent.routes import Agent, Folders
 from couchy_agent.store import Lockout, Store
 from couchy_agent.tickets import Tickets
@@ -257,6 +257,26 @@ class PullsTest(AioHTTPTestCase):
         self.assertEqual((out["state"], out["error"]), ("failed", "exists"))
         self.assertNotIn(CIVITAI_TOKEN, self.logs.getvalue())
 
+    async def test_two_links_to_one_place_are_two_pulls(self):
+        key = await self.key()
+        first, second = safetensors(b"first" * 9), safetensors(b"second" * 9)
+        a = await self.start(key, self.unhashed(self.offer("a", first, mode="slow")))
+        b = await self.start(key, self.unhashed(self.offer("b", second)))
+        self.assertNotEqual(a, b)
+        # A query that isn't the token is part of which file a link is.
+        self.assertNotEqual(link_of({"url": "https://h/f.gguf?v=1"}), link_of({"url": "https://h/f.gguf?v=2"}))
+        self.assertEqual(link_of({"url": "https://h/f.gguf?v=1"}), link_of({"url": "https://h/f.gguf?token=a&v=1"}))
+        # Asked for again while it runs, a link is the pull it started.
+        self.assertEqual(await self.start(key, self.unhashed(self.url("a") + "?token=new")), a)
+        landed = await self.wait(key, b)
+        self.assertEqual((landed["state"], landed["sha256"]), ("done", sha(second)), landed)
+        self.src.gate.set()
+        late = await self.wait(key, a)
+        # The first link is never told the second's file is its own.
+        self.assertEqual((late["state"], late.get("error"), late.get("sha256")), ("failed", "exists", None), late)
+        self.assertEqual(self.read("models/loras/n.safetensors"), second)
+        self.assertEqual(os.listdir(self.t.path("models/.couchy-partial")), [])
+
     async def test_a_pull_with_a_hash_and_no_size_is_checked_by_its_hash(self):
         key = await self.key()
         data = b"0123456789"
@@ -294,9 +314,10 @@ class PullsTest(AioHTTPTestCase):
         data = safetensors(b"weights" * 9)
         pdir = self.t.path("models/.couchy-partial")
         os.makedirs(pdir)
-        with open(os.path.join(pdir, pull_id("", "host", "loras", "n.safetensors")), "wb") as f:
+        url = self.offer("n", data)
+        with open(os.path.join(pdir, pull_id(link_of({"url": url}), "host", "loras", "n.safetensors")), "wb") as f:
             f.write(b"someone else's bytes")
-        out = await self.pull(key, self.unhashed(self.offer("n", data)))
+        out = await self.pull(key, self.unhashed(url))
         self.assertEqual((out["state"], out["sha256"]), ("done", sha(data)), out)
         self.assertNotIn("Range", self.src.seen[0][1])
 
@@ -320,7 +341,7 @@ class PullsTest(AioHTTPTestCase):
                 r = await self.client.post("/couchy/models/pull", headers=auth(key), json={
                     "location": "host", "folder": "loras", "path": "n.safetensors", "source": source, **left})
                 self.assertEqual(r.status, 400, (source, left))
-        for bad in ({"sha256": "abc"}, {"size": 0}, {"size": "5"}):
+        for bad in ({"sha256": "abc"}, {"sha256": ""}, {"sha256": 0}, {"sha256": False}, {"sha256": []}, {"size": 0}, {"size": "5"}):
             r = await self.client.post("/couchy/models/pull", headers=auth(key), json=self.unhashed(self.url("n"), **bad))
             self.assertEqual(r.status, 400, bad)
 
