@@ -122,7 +122,10 @@ class ModelsRoutes:
     async def space(self, request):
         self._need(request)
         locs = await asyncio.to_thread(self.locations.all)
-        return web.json_response(await asyncio.to_thread(models.space, locs))
+        out = await asyncio.to_thread(models.space, locs)
+        # What a pull may fetch, so the API can say so before it starts one.
+        out["allowPickle"] = self.pulls is not None and self.pulls.config.allow_pickle()
+        return web.json_response(out)
 
     # What ran together -----------------------------------------------------
 

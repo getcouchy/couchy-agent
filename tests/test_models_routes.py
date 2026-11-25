@@ -162,7 +162,9 @@ class ModelsRoutesTest(AioHTTPTestCase):
         self.t.write("nas-hot/loras/b.safetensors")
         key = (await self.pair())["key"]
         r = await self.client.get("/couchy/models/space", headers=auth(key))
-        vols = (await r.json())["volumes"]
+        out = await r.json()
+        vols = out["volumes"]
+        self.assertIs(out["allowPickle"], False)
         self.assertEqual([(v["location"], v["folders"]) for v in vols], [("host", ["checkpoints"]), ("nas-hot", ["loras"])])
         self.assertTrue(all(v["totalBytes"] >= v["freeBytes"] >= 0 for v in vols))
 

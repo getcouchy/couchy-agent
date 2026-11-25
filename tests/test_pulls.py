@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import struct
 import unittest
 
 from aiohttp import web
@@ -30,6 +31,11 @@ CIVITAI_TOKEN = "civitai_query_token_1a2b3c"
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def safetensors(data):
+    head = json.dumps({"w": {"dtype": "U8", "shape": [len(data)], "data_offsets": [0, len(data)]}}).encode()
+    return struct.pack("<Q", len(head)) + head + data
 
 
 def auth(key):
@@ -68,6 +74,13 @@ class Source:
             start = int(rng[len("bytes="):-1])
             return web.Response(status=206, body=data[start:],
                                 headers={"Content-Range": f"bytes {start}-{len(data) - 1}/{len(data)}"})
+        if mode == "nolength":
+            resp = web.StreamResponse()
+            resp.enable_chunked_encoding()
+            await resp.prepare(request)
+            await resp.write(data)
+            await resp.write_eof()
+            return resp
         if mode == "slow":
             resp = web.StreamResponse()
             resp.content_length = len(data)
@@ -221,6 +234,95 @@ class PullsTest(AioHTTPTestCase):
         self.assertEqual([(f["path"], f["sha256"]) for f in files], [("sdxl/base.safetensors", sha(data))])
         # The partial folder is never listed or hashed.
         self.assertFalse(any(".couchy-partial" in k[2] for k in self.index.shas()))
+
+    # A pull with no known hash or size -----------------------------------------
+
+    def unhashed(self, url, path="n.safetensors", **more):
+        return {"location": "host", "folder": "loras", "path": path, "source": {"url": url}, **more}
+
+    async def test_a_pull_with_no_hash_is_hashed_as_it_lands(self):
+        key = await self.key()
+        data = safetensors(b"weights" * 9)
+        out = await self.pull(key, self.unhashed(self.offer("n", data)))
+        self.assertEqual((out["state"], out["sha256"]), ("done", sha(data)), out)
+        self.assertEqual((out["bytesDone"], out["bytesTotal"]), (len(data), len(data)))
+        self.assertEqual(self.read("models/loras/n.safetensors"), data)
+        self.assertEqual(self.index.with_sha(sha(data))[0][:3], ("host", "loras", "n.safetensors"))
+        # The same link again, as after the API restarts, is the pull that landed.
+        again = await self.pull(key, self.unhashed(self.url("n") + "?token=new"))
+        self.assertEqual((again["state"], again["sha256"]), ("done", sha(data)))
+        self.assertEqual(len(self.src.seen), 1)
+        # Another link to the same place isn't.
+        out = await self.pull(key, self.unhashed(self.offer("other", data)))
+        self.assertEqual((out["state"], out["error"]), ("failed", "exists"))
+        self.assertNotIn(CIVITAI_TOKEN, self.logs.getvalue())
+
+    async def test_a_pull_with_a_hash_and_no_size_is_checked_by_its_hash(self):
+        key = await self.key()
+        data = b"0123456789"
+        body = {**self.body(data, self.offer("a", data))}
+        del body["size"]
+        out = await self.pull(key, body)
+        self.assertEqual((out["state"], out["bytesTotal"], out["sha256"]), ("done", len(data), sha(data)), out)
+        # The same file already there is done at once, and sized by itself.
+        body = {**self.body(data, self.url("a")), "path": "a.safetensors"}
+        del body["size"]
+        self.pulls._pulls.clear()
+        out = await self.pull(key, body)
+        self.assertEqual((out["state"], out["bytesDone"], out["bytesTotal"]), ("done", len(data), len(data)), out)
+        self.assertEqual(len(self.src.seen), 1)
+        body = {**self.body(data, self.offer("b", b"another file")), "path": "b.safetensors"}
+        del body["size"]
+        out = await self.pull(key, body)
+        self.assertEqual((out["state"], out["error"]), ("failed", "hash_mismatch"))
+        self.assertFalse(self.t.exists("models/checkpoints/b.safetensors"))
+
+    async def test_a_pull_with_no_hash_takes_only_a_model_file(self):
+        key = await self.key()
+        for name, path, data, error in (
+                ("page", "p.safetensors", b"<!doctype html><title>Sign in</title>", "not_a_model"),
+                ("empty", "e.safetensors", b"", "not_a_model"),
+                ("gg", "g.gguf", b"<html>", "not_a_model"),
+                ("ok", "ok.gguf", b"GGUF" + b"\0" * 20, None)):
+            out = await self.pull(key, self.unhashed(self.offer(name, data), path=path))
+            self.assertEqual(out.get("error"), error, name)
+            self.assertEqual(self.t.exists(f"models/loras/{path}"), error is None, name)
+        self.assertEqual(os.listdir(self.t.path("models/.couchy-partial")), [])
+
+    async def test_a_pull_with_no_hash_never_resumes(self):
+        key = await self.key()
+        data = safetensors(b"weights" * 9)
+        pdir = self.t.path("models/.couchy-partial")
+        os.makedirs(pdir)
+        with open(os.path.join(pdir, pull_id("", "host", "loras", "n.safetensors")), "wb") as f:
+            f.write(b"someone else's bytes")
+        out = await self.pull(key, self.unhashed(self.offer("n", data)))
+        self.assertEqual((out["state"], out["sha256"]), ("done", sha(data)), out)
+        self.assertNotIn("Range", self.src.seen[0][1])
+
+    async def test_a_pull_with_no_size_keeps_the_reserve(self):
+        key = await self.key()
+        data = safetensors(b"weights" * 9)
+        self.config.set(reserveBytes=1 << 62)
+        out = await self.pull(key, self.unhashed(self.offer("n", data)))
+        self.assertEqual((out["state"], out["error"]), ("failed", "no_room"))
+        # With no length to size it by, it stops while it streams.
+        out = await self.pull(key, self.unhashed(self.offer("c", data, mode="nolength"), path="c.safetensors"))
+        self.assertEqual((out["state"], out["error"]), ("failed", "no_room"))
+        self.config.set(reserveBytes=0)
+        out = await self.pull(key, self.unhashed(self.url("c"), path="c.safetensors"))
+        self.assertEqual((out["state"], out["bytesTotal"], out["sha256"]), ("done", len(data), sha(data)), out)
+
+    async def test_only_a_link_may_come_without_a_hash_or_a_size(self):
+        key = await self.key()
+        for source in ({"peer": "http://nas", "ticket": "t"}, {"presigned": "https://bucket/x"}):
+            for left in ({"size": 5}, {"sha256": sha(b"x")}):
+                r = await self.client.post("/couchy/models/pull", headers=auth(key), json={
+                    "location": "host", "folder": "loras", "path": "n.safetensors", "source": source, **left})
+                self.assertEqual(r.status, 400, (source, left))
+        for bad in ({"sha256": "abc"}, {"size": 0}, {"size": "5"}):
+            r = await self.client.post("/couchy/models/pull", headers=auth(key), json=self.unhashed(self.url("n"), **bad))
+            self.assertEqual(r.status, 400, bad)
 
     async def test_a_pull_into_a_share(self):
         key = await self.key()

@@ -192,10 +192,10 @@ rest), and all are also served under `/api/`. Every route that names a file take
 | --- | --- |
 | `GET /couchy/models?[folder][&location][&after][&limit]` | A page (at most 1000) of model files, every folder and location unless narrowed: `{files: [{location, folder, path, size, mtime, sha256, verifiedAt}], next?}`. `sha256` and `verifiedAt` are null until the file is hashed. Pass `next` as `after` |
 | `GET /couchy/models/header?folder&path[&location]` | A `.safetensors` file's header, read from its first bytes: `{metadata, tensors: [{name, dtype, shape}], tensorCount, truncated}`. `location` defaults to `host`. At most 2000 tensors are listed. 422 for any other format and for a header over 1 MB; 404 for a missing file or a symlink |
-| `GET /couchy/models/space` | Each volume that holds a models folder: `{volumes: [{location, folders, freeBytes, totalBytes}]}` |
+| `GET /couchy/models/space` | Each volume that holds a models folder, and whether a pull may fetch pickle formats: `{volumes: [{location, folders, freeBytes, totalBytes}], allowPickle}` |
 | `GET /couchy/models/history?[since]` | Which hashed models ran together in ComfyUI's history: `{runs: [{at, sha256: [...]}]}`, oldest first, `at` in seconds, after `since` when given. No prompts, prompt ids, images or other inputs. Empty in store mode |
-| `GET /couchy/models/pulls/{id}` | `{id, state: queued \| running \| verifying \| done \| failed, bytesDone, bytesTotal, error?}`. 404 for a pull this agent doesn't have, as after a restart |
-| `POST /couchy/models/pull {sha256, location, folder, path, size, source}` | `write`. Starts a pull and answers `{id}` at once (the same id for a pull of the same file to the same place that's still running). `source` is `{url, headers?}`, `{peer, ticket}` (`peer` being another agent's base URL) or `{presigned}` (a bucket object's presigned URL, minted by the API for this pull) |
+| `GET /couchy/models/pulls/{id}` | `{id, state: queued \| running \| verifying \| done \| failed, bytesDone, bytesTotal, sha256?, error?}`. `bytesTotal` is 0 until it's known, and `sha256` is there once it's done. 404 for a pull this agent doesn't have, as after a restart |
+| `POST /couchy/models/pull {sha256, location, folder, path, size, source}` | `write`. Starts a pull and answers `{id}` at once (the same id for a pull of the same file to the same place that's still running). `source` is `{url, headers?}`, `{peer, ticket}` (`peer` being another agent's base URL) or `{presigned}` (a bucket object's presigned URL, minted by the API for this pull). A `url` may leave out `sha256`, `size` or both (see "Pulls") |
 | `POST /couchy/models/pulls/{id}/cancel` | `write`. Stops it and removes the partial file; answers its state |
 | `POST /couchy/models/delete {sha256, location, folder, path}` | `write`. Deletes the file only when its indexed hash is `sha256`. Answers `{state: deleted \| missing \| mismatch \| refused}`, with a `reason` for refused (`not_hashed` yet, a `symlink` or a bad `path`) |
 | `POST /couchy/models/tickets {sha256, location, ttl?}` | `write`. A one-time ticket for the file with that hash there, for another agent's pull: `{ticket, expiresAt}`. `ttl` is seconds, 300 by default and at most 3600. 404 when no hashed file there has that hash |
@@ -204,7 +204,7 @@ rest), and all are also served under `/api/`. Every route that names a file take
 `error` on a failed pull is one of `exists` (a different file is at the target), `hash_mismatch`,
 `size_mismatch`, `pickle_refused`, `format_refused`, `host_not_allowed`, `no_room`,
 `ticket_refused`, `not_found`, `source_refused`, `source_failed`, `too_many_redirects`,
-`network`, `io`, `location_missing`, `bad_source` or `cancelled`.
+`network`, `io`, `location_missing`, `bad_source`, `not_a_model` or `cancelled`.
 
 A listing is the inventory as of the last scan: the host is scanned every minute and shares
 every five, so a NAS isn't walked on every page.
@@ -242,6 +242,12 @@ that turns up empty or missing (a mount that failed) keeps its hashes until it's
   a failure or a restart (the pull answers 404 then: pulls are kept in memory) it picks up the
   partial file with `Range`. A source that ignores `Range` starts over. A network error keeps the
   partial file; a mismatch or a cancel removes it.
+- **A link whose file isn't known.** A `url` may come without `sha256` or `size`. With no size,
+  the room is checked against the length the link answers with, or as it streams when it gives none.
+  With no hash, the file is hashed as it streams, its SHA-256 is in the pull's answer, and it lands
+  only if it is what its name says (a safetensors header, or GGUF's mark), so a sign-in page fails
+  with `not_a_model`. Such a pull never resumes: nothing tells whose the partial bytes are. Asked
+  for again once it landed, as after a restart of the API, it's `done`.
 - **A share is a target** like `host`, so a GPU host that mounts nas-cold can copy to it.
 - **Safe formats only:** `.safetensors`, `.gguf` and `.sft`. Pickle formats (`.ckpt`, `.pt`,
   `.pth`, `.bin`) run code when ComfyUI loads them, and fail with `pickle_refused` unless the host
